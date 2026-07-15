@@ -9,7 +9,7 @@ Production-grade, multi-tenant B2B procurement SaaS foundation. Phase 1 implemen
 - `packages/shared`, `packages/config`, `packages/ui`: shared permissions/types, validated configuration, and reusable UI primitives.
 
 ## Prerequisites
-Node.js 22, pnpm 9, Docker, and Docker Compose.
+Node.js 22, pnpm 10, Docker, and Docker Compose.
 
 ## Local setup
 ```bash
@@ -35,7 +35,7 @@ Run `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm test:
 - Web: `pnpm --filter @procurement/web dev`.
 
 ## Security assumptions
-Tenant context is set per transaction using `app.current_tenant_id`. Production authentication must use Auth0 Organizations/OIDC. The development auth adapter is rejected in production configuration. Object storage is private by default through signed-URL interfaces.
+Tenant context is set per transaction using `app.current_tenant_id` only after authentication and active membership authorization. Production authentication must use Auth0 Organizations/OIDC. The development auth adapter is rejected in production configuration. Object storage is private by default through signed-URL interfaces.
 
 ## Implemented scope
 Phase 1 foundation: tenancy, membership, role and permission models, organization structures, audit events, file metadata, RLS migration, deny-by-default policies, segregation-of-duties hooks, and local infrastructure.

@@ -1,12 +1,25 @@
-# Phase 1 Foundation
+# Local Development
 
-This document describes Phase 1 production foundation work only. Procurement workflow modules, fake operational data, decorative dashboards, Excel reports, and PDF reports are intentionally deferred.
+## Prerequisites
+- Node.js 22.
+- pnpm 10.
+- Docker and Docker Compose.
 
-## Scope
-- Monorepo foundation with pnpm workspaces and Turborepo.
-- PostgreSQL, Redis, Prisma schema, and explicit SQL RLS migration.
-- NestJS foundation services for health, authentication boundaries, authorization, audit events, and secure file metadata authorization.
-- Next.js application shell and design-system primitives without workflow pages or fake data.
+## Setup
+```bash
+cp .env.example .env
+pnpm install
+docker compose up -d
+pnpm db:migrate
+pnpm test
+pnpm test:integration
+pnpm dev
+```
 
-## Security posture
-Tenant-owned persistence includes `tenant_id`; RLS policies compare it to `current_setting('app.current_tenant_id', true)` and deny access when absent. Authorization is deny-by-default and server-side. Audit events are append-only and sensitive metadata is redacted.
+## Services
+- API: `http://localhost:3001/v1/health`.
+- Web: `http://localhost:3000`.
+- PostgreSQL: `localhost:5432`.
+- Redis: `localhost:6379`.
+
+Local credentials are placeholders only and must not be reused outside local development.

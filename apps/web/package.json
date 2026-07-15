@@ -1,1 +1,24 @@
-{"name":"@procurement/web","version":"0.1.0","type":"module","scripts":{"build":"next build","dev":"next dev","lint":"eslint app/**/*.tsx components/**/*.tsx","typecheck":"tsc -p tsconfig.json --noEmit","test":"vitest run --passWithNoTests","test:integration":"vitest run --passWithNoTests"},"dependencies":{"@procurement/ui":"workspace:*","next":"^15.1.3","react":"^19.0.0","react-dom":"^19.0.0","lucide-react":"^0.468.0"},"devDependencies":{"@types/react":"^19.0.2","@types/react-dom":"^19.0.2"}}
+{
+  "name": "@procurement/web",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "next build",
+    "dev": "next dev",
+    "lint": "eslint .",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "test:integration": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@procurement/ui": "workspace:*",
+    "next": "^15.1.3",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "lucide-react": "^0.468.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2"
+  }
+}

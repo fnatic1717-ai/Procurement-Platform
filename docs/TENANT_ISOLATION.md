@@ -1,12 +1,16 @@
-# Phase 1 Foundation
+# Tenant Isolation
 
-This document describes Phase 1 production foundation work only. Procurement workflow modules, fake operational data, decorative dashboards, Excel reports, and PDF reports are intentionally deferred.
+Phase 1 uses shared PostgreSQL infrastructure with mandatory tenant discrimination and database-enforced Row-Level Security.
 
-## Scope
-- Monorepo foundation with pnpm workspaces and Turborepo.
-- PostgreSQL, Redis, Prisma schema, and explicit SQL RLS migration.
-- NestJS foundation services for health, authentication boundaries, authorization, audit events, and secure file metadata authorization.
-- Next.js application shell and design-system primitives without workflow pages or fake data.
+## Database rules
+- Every tenant-owned table includes `tenant_id`.
+- Tenant-owned role permissions include `tenant_id`; global platform permissions and platform roles are modeled separately.
+- Composite tenant-aware foreign keys prevent cross-tenant role assignments, file links, organization hierarchies, and membership references.
+- PostgreSQL enums constrain tenant status, actor type, membership status, membership type, file upload state, scan status, and file classification.
+- RLS policies compare each row's `tenant_id` with `current_setting('app.current_tenant_id', true)` and deny access when tenant context is absent.
 
-## Security posture
-Tenant-owned persistence includes `tenant_id`; RLS policies compare it to `current_setting('app.current_tenant_id', true)` and deny access when absent. Authorization is deny-by-default and server-side. Audit events are append-only and sensitive metadata is redacted.
+## Application rules
+Tenant context is set inside a database transaction after authentication and tenant membership authorization. The application must not trust a tenant ID from request headers or request bodies without validating the user's active membership.
+
+## Verification
+The integration test suite applies the real SQL migration to PostgreSQL and proves allowed same-tenant operations, denied cross-tenant reads/writes/updates/deletes, denied absent and invalid tenant context, append-only audit behavior, cross-tenant FileLink denial, and cross-tenant role-assignment denial.
