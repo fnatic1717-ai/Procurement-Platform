@@ -12,7 +12,7 @@ Can:
 - View status of requisitions, linked RFQs where permitted, POs, receipts, and invoice exceptions related to own requests.
 
 Cannot:
-- Approve own requisition unless tenant policy explicitly allows self-approval below threshold.
+- Approve own requisition by default; any exception requires explicit tenant policy, written justification, independent additional approval, and immutable audit logging.
 - View unrelated supplier commercial quotations.
 - Modify approval policies.
 
@@ -33,7 +33,7 @@ Can:
 - Record procurement comments and supplier communication history.
 
 Cannot:
-- Override required approval policies.
+- Override required approval policies or solely approve their own award recommendation or high-value PO.
 - Access other tenant data.
 - Approve finance-only invoice decisions unless assigned finance permission.
 
@@ -68,7 +68,7 @@ Can:
 - Submit quotations, clarification questions, order acknowledgements, delivery updates, and invoice-related information where enabled.
 
 Cannot:
-- View competing suppliers, buyer internal evaluations, approval records, or tenant administrative settings.
+- View competing suppliers, competing quotations, internal budgets, buyer evaluations, approvals, negotiation records, or tenant administrative settings.
 
 ### Tenant Administrator
 Can:
@@ -103,10 +103,14 @@ Cannot:
 - Audit log access.
 
 ## Security Constraints
-- Deny by default.
+- Deny by default for every API, report, dashboard, file, background job, and workflow action.
 - Supplier users are always externally scoped.
 - Approval decisions require active assignment or policy authority.
 - Users cannot approve records where segregation-of-duties rules prohibit participation.
+- A requester must not approve their own requisition by default.
+- A buyer must not solely approve their own award recommendation or high-value PO.
+- Supplier users must never access competing quotations, internal budgets, evaluations, approvals, or negotiation records.
+- Exceptional overrides require explicit policy, justification, independent additional approval, and immutable audit logging.
 - Administrative impersonation, if implemented later, must be time-bound, justified, explicitly consented, and fully audited.
 
 ## MVP Permission Matrix

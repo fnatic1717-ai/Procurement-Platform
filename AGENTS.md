@@ -18,12 +18,12 @@ Include:
 - Delivery and goods receipt.
 - Invoice matching.
 - Supplier performance records.
-- Multi-tenant security, audit, reporting exports, and deployment foundations.
+- Multi-tenant security, audit, practical dashboards, analytics, professional Excel and PDF reporting, and deployment foundations.
 
 Exclude until architecture review and approval:
 
-- Nonessential dashboards.
-- Decorative KPIs.
+- Decorative, fake, vanity, or unsupported dashboards and KPIs.
+- Screens, metrics, icons, charts, or features without a real procurement business purpose.
 - Mock data as product behavior.
 - Application page implementation.
 - Advanced analytics, AI recommendations, and marketplace features.
@@ -41,3 +41,4 @@ Exclude until architecture review and approval:
 - Prefer explicit workflow states and permission rules over vague descriptions.
 - Document assumptions and future enhancements separately from MVP commitments.
 - Do not add decorative metrics or dashboard requirements without explicit approval.
+- Do not remove practical procurement dashboards, analytics, Excel reporting, or PDF reporting merely because they include charts; require real operational data and a clear business purpose.

@@ -97,4 +97,4 @@ Routing outputs include:
 - Invoice quantity exception: route to receiving user, buyer, and finance.
 
 ## MVP Boundaries
-The workflow documentation defines states and transitions only. It does not approve building nonessential dashboards, decorative KPIs, mock data flows, or application pages before architecture approval.
+The workflow documentation defines states and transitions for procurement execution and supports practical analytics from real operational data. It does not approve building decorative, fake, vanity, or unsupported KPIs, mock data flows, or application pages before architecture approval.

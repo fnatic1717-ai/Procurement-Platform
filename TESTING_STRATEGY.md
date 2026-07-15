@@ -16,6 +16,7 @@ Cover:
 - Monetary calculations and currency handling.
 - Invoice matching rules.
 - Supplier performance event calculations.
+- KPI formulas for spend, savings, aging, cycle time, RFQ competition, commitments, delivery, invoice exceptions, supplier responsiveness, supplier quality, and SLA performance.
 
 ### Integration Tests
 Cover:
@@ -26,6 +27,7 @@ Cover:
 - PO acknowledgement, delivery, goods receipt, and invoice matching.
 - Audit event creation for state transitions.
 - File access authorization.
+- Dashboard, Excel, and PDF report authorization.
 
 ### End-to-End Tests
 After application pages are approved and implemented, cover:
@@ -58,7 +60,8 @@ Cover:
 ## Test Data Policy
 - Use deterministic test fixtures only in test environments.
 - Do not ship mock data as production product behavior.
-- Avoid decorative demo dashboards or fake KPI datasets.
+- Avoid decorative demo dashboards, fake KPI datasets, unsupported analytics, and vanity metrics.
+- Reporting tests must use deterministic fixtures with known formulas and expected outputs.
 - Test supplier and buyer data must be clearly synthetic.
 
 ## Acceptance Criteria

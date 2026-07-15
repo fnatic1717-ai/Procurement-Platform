@@ -1,79 +1,104 @@
 # Security Architecture
 
 ## Security Objectives
-- Enforce tenant isolation across users, suppliers, records, files, workflows, and reports.
-- Protect confidential procurement data including prices, supplier offers, financial terms, and approval decisions.
-- Provide auditable access, decisions, and administrative actions.
-- Support enterprise security expectations from the start of MVP.
+- Enforce tenant isolation across users, suppliers, records, files, reports, dashboards, jobs, and audit logs.
+- Protect confidential procurement data including prices, supplier offers, budgets, evaluations, negotiations, financial terms, and approval decisions.
+- Provide auditable access, decisions, administrative actions, report generation, and downloads.
+- Support enterprise security expectations from the MVP.
 
 ## Identity and Authentication
-MVP authentication should support:
+MVP authentication uses Auth0 Organizations with OIDC support and secure application sessions.
 
-- Email-based user identity.
-- Strong password policy or external identity provider integration.
-- Multi-factor authentication readiness.
-- Session expiration and refresh controls.
+Controls:
+
+- Strong password policy when local credentials are enabled by the identity provider.
+- Multi-factor authentication support for tenant administrators, finance users, procurement managers, and platform administrators.
+- Secure, HttpOnly, SameSite cookies with the Secure flag in production.
+- Short-lived application sessions with refresh rotation where supported.
 - Separate internal tenant users and external supplier users.
-
-Future enterprise options:
-
-- SAML SSO.
-- OIDC SSO.
-- SCIM provisioning.
-- Conditional access policies.
+- Brute-force protection, login rate limiting, suspicious login monitoring, and account lockout or step-up verification.
 
 ## Authorization
-Authorization is enforced through:
+Authorization is deny-by-default and enforced server-side for every API, job, file, report, and dashboard request.
+
+Authorization inputs:
 
 - Tenant membership.
 - Role assignment.
 - Workflow assignment.
 - Supplier account membership.
 - Object ownership.
-- Policy constraints such as amount threshold and segregation of duties.
+- Department, cost center, category, amount, and policy constraints.
+- Segregation-of-duties rules.
 
-All authorization checks must be server-side. Client-side checks are convenience only.
+Segregation-of-duties controls:
 
-## Tenant Isolation
-- Every tenant-owned object must include tenant context.
-- Supplier users must be scoped to supplier accounts and invited records.
-- File access must validate tenant, object link, and user permission before issuing downloads.
-- Background jobs must execute with explicit tenant context.
-- Reporting queries must never aggregate across tenants unless platform administration explicitly requires anonymized operational metrics.
+- A requester must not approve their own requisition by default.
+- A buyer must not solely approve their own award recommendation or high-value PO.
+- Supplier users must never access competing quotations, internal budgets, evaluations, approvals, or negotiation records.
+- Any exceptional override requires explicit tenant policy, written justification, additional approval by an independent authorized approver, and immutable audit logging.
 
-## Data Protection
-- Encrypt data in transit with TLS.
-- Encrypt data at rest using managed database and object storage encryption.
-- Store secrets in a managed secret store, never in source code.
-- Hash passwords using a modern password hashing algorithm if local passwords are supported.
-- Treat quotation pricing, PO terms, invoices, and supplier compliance documents as confidential.
+## Database-Enforced Tenant Isolation
+- PostgreSQL row-level security must be enabled for tenant-owned tables.
+- Every tenant-owned table must include `tenant_id` with foreign key constraints where applicable.
+- Database sessions must set tenant context for request and background job execution.
+- RLS policies must deny access when tenant context is absent.
+- Automated tests must verify cross-tenant reads, writes, updates, deletes, reports, and file references are denied.
+- Administrative maintenance paths must be separated, restricted, logged, and reviewed.
 
-## Audit Events
-Audit events must capture:
+## Application and Browser Security
+- CSRF protection is required for cookie-authenticated state-changing requests.
+- Content Security Policy must restrict script, style, image, frame, and connection sources to approved origins.
+- Security headers must include HSTS, X-Content-Type-Options, Referrer-Policy, frame protections, and permissions policy.
+- Input validation is required at all API and file upload boundaries.
+- Output encoding is required for future web UI.
+- Rate limiting must protect authentication, supplier invitation, quotation submission, report generation, file download, and public callback endpoints.
 
-- Authentication and authorization-sensitive events.
-- Role and permission changes.
-- Approval decisions.
-- Workflow state transitions.
-- RFQ publication and quotation submission.
-- Award decisions.
-- PO issue, acknowledgement, amendment, cancellation, and closure.
-- Goods receipt posting.
-- Invoice match decisions and exception resolutions.
-- Administrative support access.
+## File and Object Storage Security
+- Object storage must be private by default.
+- File downloads must use signed temporary URLs issued only after a fresh authorization check.
+- Uploads must validate file type, extension, MIME type, size, tenant scope, object link, and malware scan result.
+- Malware scanning is required before files are made available to other users.
+- File metadata must include tenant, uploader, checksum, scan status, linked object, retention policy, and classification.
+- Supplier-uploaded files must not be executable and must be isolated from internal-only files.
 
-## Supplier Portal Security
-- Supplier users can access only their supplier account and invited procurement events.
-- Supplier quotation visibility is restricted to submitting supplier and authorized buyer-side users.
-- Supplier file uploads require malware scanning integration readiness.
-- Supplier sessions should be isolated from internal tenant administration surfaces.
+## Data Protection, Secrets, and Keys
+- Encrypt data in transit with TLS 1.2 or higher, with TLS 1.3 preferred.
+- Encrypt database, backups, queues, caches where supported, and object storage at rest using managed keys.
+- Store secrets in AWS Secrets Manager or an equivalent managed secret store, never in source code or CI logs.
+- Rotate application secrets, signing keys, database credentials, and report download signing keys on a defined schedule and immediately after suspected compromise.
+- Use least-privilege IAM roles for application services, background workers, CI/CD, and operators.
 
-## Secure Development Requirements
-- No try/catch wrappers around imports.
-- Dependency updates must be reviewed for security impact.
-- Input validation is required for all API boundaries.
-- Output encoding is required for any future web UI.
-- Security-sensitive changes require tests.
+## Audit-Log Tamper Resistance
+- Audit events must be append-only at the application layer.
+- Audit tables should restrict updates and deletes to controlled retention operations.
+- Audit events must include actor, tenant, object, action, prior state, resulting state, timestamp, correlation ID, IP or network context where appropriate, policy version, and report template version where relevant.
+- High-risk audit streams should include hash chaining or periodic digesting to tamper-evident storage.
+- Administrative access to audit logs must itself be audited.
+
+## Logging and Redaction
+- Logs must redact secrets, tokens, passwords, session IDs, signed URLs, supplier quotation prices where not required, invoice details where not required, and personal data beyond operational necessity.
+- Structured logs must include correlation IDs and tenant-safe identifiers.
+- Error messages shown to users must be safe and must not reveal object existence across tenant or supplier boundaries.
+
+## Security Testing and Scanning
+Required automated checks:
+
+- Tenant-isolation tests across operational records, reports, jobs, and files.
+- Authorization allow-and-deny tests for each role and workflow action.
+- Supplier boundary tests for RFQs, quotations, negotiations, approvals, and reports.
+- Dependency vulnerability scanning.
+- Secret scanning.
+- Static application security testing.
+- Container image scanning where containers are used.
+- Infrastructure-as-code scanning when infrastructure definitions are added.
+
+## Backup, Restore, Disaster Recovery, and Incident Response
+- Production database and object storage backups must be encrypted and retained according to approved policy.
+- Restore procedures must be tested before production launch and on a recurring schedule.
+- Recovery time objective and recovery point objective must be approved before launch.
+- Incident response must define severity levels, containment, evidence preservation, tenant notification criteria, regulatory notification review, and post-incident remediation.
+- Disaster recovery runbooks must cover database restore, object storage restore, identity provider outage, report job backlog, and credential compromise.
 
 ## MVP Boundaries
-MVP security focuses on tenant isolation, RBAC, auditability, secure files, and workflow authorization. Advanced anomaly detection, decorative security dashboards, and nonessential compliance portals are excluded until the architecture is approved.
+MVP security includes implementation-level controls for tenant isolation, RLS, RBAC, secure sessions, CSRF, security headers, rate limiting, private files, signed URLs, malware scanning, audit tamper resistance, redaction, scanning, backup, restore, disaster recovery, incident response, and automated security tests.

@@ -13,15 +13,17 @@ The MVP includes:
 - Purchase order creation, approval, supplier acknowledgement, and lifecycle tracking.
 - Delivery tracking, goods receipt, invoice matching, and exception management.
 - Supplier profile, qualification status, and performance records.
-- Role-based access control, audit logs, workflow states, and tenant isolation.
+- Role-based access control, audit logs, workflow states, segregation-of-duties controls, and tenant isolation.
+- Decision-focused procurement dashboards and analytics based on real operational data.
+- Professional Excel and PDF reporting with governed templates, background rendering, secure storage, and audited downloads.
 - Architecture documentation and implementation sequencing.
 
 The MVP excludes:
 
-- Nonessential dashboards and decorative KPIs.
-- Mock data as a product feature.
+- Decorative, fake, vanity, or unsupported KPIs that do not support a procurement decision.
+- Mock data as a product feature or production behavior.
 - Application page implementation before architecture review and approval.
-- Advanced spend analytics, predictive sourcing, marketplace integrations, and AI recommendations.
+- Predictive sourcing, AI recommendations, marketplace features, and advanced data science beyond defined operational analytics.
 - Complex ERP integrations beyond documented integration boundaries.
 
 ## Primary Users
@@ -83,10 +85,18 @@ The MVP excludes:
 
 ### Supplier Performance
 - Supplier performance records include delivery timeliness, quality exceptions, quotation responsiveness, order acknowledgement, dispute history, and compliance status.
-- MVP reporting should expose auditable records and exportable datasets rather than decorative dashboards.
+- MVP analytics must use real operational data to support supplier review, sourcing decisions, and corrective actions.
+
+### Reporting, Dashboards, and Analytics
+- The MVP includes practical procurement dashboards for buyers, procurement managers, finance reviewers, and tenant administrators.
+- Dashboards must focus on decisions: aging work, blocked approvals, open commitments, RFQ competition, cycle time, delivery risk, invoice exceptions, supplier responsiveness, supplier quality, savings, spend, and SLA performance.
+- Every KPI must define formula, source data, filters, permissions, refresh behavior, and limitations before implementation.
+- Professional Excel reports must support `.xlsx` workbooks with branded templates, workbook metadata, formatted tables, filters, frozen headers, formulas where appropriate, conditional formatting, charts where they support decisions, and permission-aware datasets.
+- Branded PDF reports must cover quotation comparison, award recommendation, purchase orders, spend analysis, supplier performance, savings, approval history, and monthly procurement management reporting.
+- Report generation must run through tenant-scoped background jobs, private object storage, signed temporary download URLs, template versioning, and immutable audit events.
 
 ## Non-Functional Requirements
-- Tenant isolation by design at application, database, and audit layers.
+- Tenant isolation by design at application, database, row-level security, file, reporting, and audit layers.
 - Configurable approval policies without code deployment.
 - Immutable audit trail for lifecycle transitions and security-sensitive events.
 - Secure supplier portal boundaries.
@@ -94,6 +104,6 @@ The MVP excludes:
 - Accessibility and internationalization-ready foundations, while documentation and initial product language remain English-only.
 
 ## Success Criteria
-- The lifecycle can be represented end-to-end through approved domain models, workflow states, policies, and security boundaries.
-- MVP scope remains limited to core procurement operations and architectural foundations.
+- The lifecycle can be represented end-to-end through approved domain models, workflow states, policies, reports, analytics, and security boundaries.
+- MVP scope remains limited to commercially necessary procurement operations, reporting, analytics, and architectural foundations.
 - Implementation does not begin application pages until architecture review approval is recorded.

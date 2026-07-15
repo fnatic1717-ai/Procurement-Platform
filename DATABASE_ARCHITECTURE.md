@@ -6,7 +6,7 @@
 - Enable future integrations without compromising data ownership or traceability.
 
 ## Multi-Tenant Strategy
-MVP should use shared application infrastructure with strict tenant isolation. Each tenant-owned table must include `tenant_id`, and all queries must enforce tenant scope through application authorization and database constraints where supported.
+MVP uses PostgreSQL with shared application infrastructure, strict tenant isolation, and database-enforced row-level security. Each tenant-owned table must include `tenant_id`, all application and job database sessions must set tenant context, and RLS policies must deny access when tenant context is absent. Application authorization remains required, but database policies provide an additional enforcement layer.
 
 Potential future isolation tiers:
 
@@ -85,11 +85,17 @@ Potential future isolation tiers:
 - comments.
 - notifications.
 - export_jobs.
+- report_templates.
+- report_template_versions.
+- generated_reports.
+- dashboard_metric_snapshots.
 
 ## Data Integrity Rules
 - Lifecycle records must use immutable identifiers and tenant-scoped human-readable numbers.
 - Monetary values must store amount, currency, precision, tax treatment, and exchange-rate reference where applicable.
 - Workflow transitions must be transactional with audit event creation.
+- Dashboard metrics, Excel workbooks, and PDF reports must be generated from tenant-scoped read models or operational queries that respect RLS and authorization.
+- Generated report records must preserve report type, filters, dataset scope, template version, file reference, requesting user, generated timestamp, and source data timestamp.
 - Approval policy versions must be preserved after workflow creation.
 - Purchase order amendments must create versions rather than destructive updates.
 - Supplier quotations must preserve submitted values after closure.
@@ -102,7 +108,14 @@ Potential future isolation tiers:
 - `tenant_id` plus created date for reporting exports.
 
 ## Reporting Data Approach
-The MVP should use normalized operational tables with export-friendly read models. A separate warehouse, cube, or dashboard layer is not part of MVP scope.
+The MVP uses normalized operational tables, permission-aware read models, cached aggregate tables where needed for dashboard responsiveness, and generated report metadata. A separate enterprise data warehouse is not required for MVP, but the schema must support later warehouse replication without changing source-of-truth records.
+
+Reporting persistence includes:
+
+- Versioned report templates for branded Excel and PDF outputs.
+- Generated report metadata linked to private object storage.
+- Dashboard metric snapshots for expensive aggregates, refreshed by tenant-scoped background jobs.
+- Audit events for report requests, render completion, failed renders, and downloads.
 
 ## Retention and Audit
 - Audit events should be append-only.
