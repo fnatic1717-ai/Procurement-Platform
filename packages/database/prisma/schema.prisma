@@ -1,0 +1,315 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum TenantStatus {
+  active
+  suspended
+  archived
+
+  @@map("tenant_status")
+}
+
+enum ActorType {
+  internal_user
+  supplier_user
+  platform_admin
+  system
+
+  @@map("actor_type")
+}
+
+enum MembershipStatus {
+  active
+  inactive
+  invited
+  locked
+
+  @@map("membership_status")
+}
+
+enum MembershipType {
+  internal
+  supplier
+
+  @@map("membership_type")
+}
+
+enum FileUploadState {
+  pending
+  scanning
+  clean
+  rejected
+  deleted
+
+  @@map("file_upload_state")
+}
+
+enum FileScanStatus {
+  pending
+  scanning
+  clean
+  infected
+  failed
+
+  @@map("file_scan_status")
+}
+
+enum FileClassification {
+  internal
+  supplier_visible
+  restricted
+
+  @@map("file_classification")
+}
+
+model Tenant {
+  id        String       @id @default(uuid()) @db.Uuid
+  name      String
+  slug      String       @unique
+  status    TenantStatus @default(active)
+  createdAt DateTime     @default(now()) @map("created_at")
+  updatedAt DateTime     @updatedAt @map("updated_at")
+
+  settings          TenantSettings?
+  memberships       TenantMembership[]
+  roles             Role[]
+  organizationUnits OrganizationUnit[]
+  costCenters       CostCenter[]
+  locations         Location[]
+  auditEvents       AuditEvent[]
+  fileObjects       FileObject[]
+  fileLinks         FileLink[]
+
+  @@map("tenants")
+}
+
+model User {
+  id          String    @id @default(uuid()) @db.Uuid
+  email       String    @unique
+  displayName String    @map("display_name")
+  subject     String?   @unique
+  actorType   ActorType @default(internal_user) @map("actor_type")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  memberships   TenantMembership[]
+  auditEvents   AuditEvent[]
+  uploadedFiles FileObject[]
+
+  @@map("users")
+}
+
+model TenantSettings {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @unique @map("tenant_id") @db.Uuid
+  settings  Json     @default("{}")
+  createdBy String?  @map("created_by") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@map("tenant_settings")
+}
+
+model TenantMembership {
+  id         String           @id @default(uuid()) @db.Uuid
+  tenantId   String           @map("tenant_id") @db.Uuid
+  userId     String           @map("user_id") @db.Uuid
+  status     MembershipStatus @default(active)
+  memberType MembershipType   @default(internal) @map("member_type")
+  createdBy  String?          @map("created_by") @db.Uuid
+  createdAt  DateTime         @default(now()) @map("created_at")
+  updatedAt  DateTime         @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  user   User   @relation(fields: [userId], references: [id])
+
+  @@unique([tenantId, userId])
+  @@index([tenantId, status])
+  @@map("tenant_memberships")
+}
+
+model PlatformRole {
+  id          String   @id @default(uuid()) @db.Uuid
+  code        String   @unique
+  name        String
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("platform_roles")
+}
+
+model Permission {
+  id            String   @id @default(uuid()) @db.Uuid
+  code          String   @unique
+  description   String
+  platformScope Boolean  @default(false) @map("platform_scope")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@map("permissions")
+}
+
+model Role {
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @map("tenant_id") @db.Uuid
+  code        String
+  name        String
+  description String?
+  createdBy   String?  @map("created_by") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, code])
+  @@unique([tenantId, id])
+  @@map("roles")
+}
+
+model RolePermission {
+  tenantId    String   @map("tenant_id") @db.Uuid
+  roleId      String   @map("role_id") @db.Uuid
+  permissionId String  @map("permission_id") @db.Uuid
+  createdBy   String?  @map("created_by") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@id([tenantId, roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model UserRoleAssignment {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  roleId    String   @map("role_id") @db.Uuid
+  scopeType String   @default("tenant") @map("scope_type")
+  scopeId   String?  @map("scope_id") @db.Uuid
+  createdBy String?  @map("created_by") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([tenantId, userId, roleId, scopeType, scopeId])
+  @@index([tenantId, userId])
+  @@map("user_role_assignments")
+}
+
+model OrganizationUnit {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  code      String
+  name      String
+  parentId  String?  @map("parent_id") @db.Uuid
+  createdBy String?  @map("created_by") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, code])
+  @@unique([tenantId, id])
+  @@map("organization_units")
+}
+
+model CostCenter {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  code      String
+  name      String
+  active    Boolean  @default(true)
+  createdBy String?  @map("created_by") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, code])
+  @@unique([tenantId, id])
+  @@map("cost_centers")
+}
+
+model Location {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  code      String
+  name      String
+  address   Json?
+  createdBy String?  @map("created_by") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, code])
+  @@unique([tenantId, id])
+  @@map("locations")
+}
+
+model AuditEvent {
+  id              String    @id @default(uuid()) @db.Uuid
+  tenantId        String?   @map("tenant_id") @db.Uuid
+  actorId         String?   @map("actor_id") @db.Uuid
+  actorType       ActorType @default(system) @map("actor_type")
+  action          String
+  objectType      String    @map("object_type")
+  objectId        String?   @map("object_id") @db.Uuid
+  correlationId   String    @map("correlation_id")
+  requestContext  Json      @default("{}") @map("request_context")
+  metadata        Json?
+  priorState      Json?     @map("prior_state")
+  resultingState  Json?     @map("resulting_state")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  tenant Tenant? @relation(fields: [tenantId], references: [id])
+  actor  User?   @relation(fields: [actorId], references: [id])
+
+  @@index([tenantId, createdAt])
+  @@index([correlationId])
+  @@map("audit_events")
+}
+
+model FileObject {
+  id             String             @id @default(uuid()) @db.Uuid
+  tenantId       String             @map("tenant_id") @db.Uuid
+  storageKey     String             @unique @map("storage_key")
+  filename       String
+  mimeType       String             @map("mime_type")
+  sizeBytes      BigInt             @map("size_bytes")
+  checksumSha256 String             @map("checksum_sha256")
+  uploaderId     String             @map("uploader_id") @db.Uuid
+  classification FileClassification
+  uploadState    FileUploadState    @default(pending) @map("upload_state")
+  scanStatus     FileScanStatus     @default(pending) @map("scan_status")
+  retentionUntil DateTime?          @map("retention_until")
+  createdAt      DateTime           @default(now()) @map("created_at")
+  updatedAt      DateTime           @updatedAt @map("updated_at")
+
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  uploader User   @relation(fields: [uploaderId], references: [id])
+
+  @@unique([tenantId, id])
+  @@index([tenantId, uploadState, scanStatus])
+  @@map("file_objects")
+}
+
+model FileLink {
+  id           String   @id @default(uuid()) @db.Uuid
+  tenantId     String   @map("tenant_id") @db.Uuid
+  fileObjectId String   @map("file_object_id") @db.Uuid
+  objectType   String   @map("object_type")
+  objectId     String   @map("object_id") @db.Uuid
+  createdBy    String?  @map("created_by") @db.Uuid
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, fileObjectId, objectType, objectId])
+  @@index([tenantId, objectType, objectId])
+  @@map("file_links")
+}

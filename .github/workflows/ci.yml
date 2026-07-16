@@ -1,0 +1,141 @@
+name: CI
+on: [push, pull_request]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  foundation:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: procurement
+          POSTGRES_PASSWORD: procurement_local
+          POSTGRES_DB: procurement
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U procurement -d procurement"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://procurement:procurement_local@localhost:5432/procurement
+      REDIS_URL: redis://localhost:6379
+      AUTH_ADAPTER: development
+      CORS_ORIGIN: http://localhost:3000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Prepare logs
+        run: mkdir -p ci-logs
+
+      - name: Database migration
+        id: migrate
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          pnpm db:migrate 2>&1 | tee ci-logs/migration.log
+      - name: Format check
+        id: format
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          pnpm format:check 2>&1 | tee ci-logs/format.log
+      - name: Lint
+        id: lint
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          pnpm lint 2>&1 | tee ci-logs/lint.log
+      - name: Typecheck
+        id: typecheck
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          pnpm typecheck 2>&1 | tee ci-logs/typecheck.log
+      - name: Unit tests
+        id: test
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          pnpm test 2>&1 | tee ci-logs/unit-tests.log
+      - name: Integration tests
+        id: integration
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          pnpm test:integration 2>&1 | tee ci-logs/integration-tests.log
+      - name: Build
+        id: build
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          pnpm build 2>&1 | tee ci-logs/build.log
+      - name: Database validation
+        id: dbvalidate
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          pnpm db:validate 2>&1 | tee ci-logs/database-validation.log
+      - name: Dependency audit
+        id: audit
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          pnpm audit:deps 2>&1 | tee ci-logs/dependency-audit.log
+      - name: Secret scan
+        id: gitleaks
+        continue-on-error: true
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+
+      - name: Create quality summary
+        if: always()
+        run: |
+          cat > ci-logs/quality-summary.txt <<'EOF'
+          migration=${{ steps.migrate.outcome }}
+          format=${{ steps.format.outcome }}
+          lint=${{ steps.lint.outcome }}
+          typecheck=${{ steps.typecheck.outcome }}
+          unit_tests=${{ steps.test.outcome }}
+          integration_tests=${{ steps.integration.outcome }}
+          build=${{ steps.build.outcome }}
+          database_validation=${{ steps.dbvalidate.outcome }}
+          dependency_audit=${{ steps.audit.outcome }}
+          secret_scan=${{ steps.gitleaks.outcome }}
+          EOF
+          cat ci-logs/quality-summary.txt
+
+      - name: Upload CI diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-diagnostics
+          path: ci-logs
+
+      - name: Final quality gate
+        if: always()
+        run: |
+          if grep -Eq '^(migration|lint|typecheck|unit_tests|integration_tests|build|database_validation|dependency_audit)=(failure|cancelled|skipped)$' ci-logs/quality-summary.txt; then
+            exit 1
+          fi
