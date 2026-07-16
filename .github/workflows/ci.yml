@@ -2,7 +2,7 @@ name: CI
 on: [push, pull_request]
 
 permissions:
-  contents: write
+  contents: read
   security-events: write
 
 jobs:
@@ -44,17 +44,7 @@ jobs:
         with:
           node-version: 22
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
-      - name: Commit generated lockfile
-        if: github.event_name == 'push'
-        run: |
-          if [ -n "$(git status --porcelain -- pnpm-lock.yaml)" ]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add pnpm-lock.yaml
-            git commit -m "chore: refresh pnpm lockfile"
-            git push
-          fi
+        run: pnpm install --frozen-lockfile
       - name: Prepare logs
         run: mkdir -p ci-logs
 
