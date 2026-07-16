@@ -1,5 +1,4 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
 import { prisma, type TransactionClient } from '@procurement/database';
 import { redactSensitive, type ActorType } from '@procurement/shared';
 
@@ -37,10 +36,13 @@ export class AuditService {
       )`;
   }
 
-  async withAuditTransaction<T>(tenantId: string, action: (tx: TransactionClient) => Promise<T>): Promise<T> {
-    return prisma.$transaction(async (tx) => {
-      await tx.$executeRaw(Prisma.sql`SELECT set_config('app.current_tenant_id', ${tenantId}, true)`);
-      return action(tx as TransactionClient);
+  async withAuditTransaction<T>(
+    tenantId: string,
+    action: (tx: TransactionClient) => Promise<T>,
+  ): Promise<T> {
+    return prisma.$transaction(async (tx: TransactionClient) => {
+      await tx.$executeRaw`SELECT set_config('app.current_tenant_id', ${tenantId}, true)`;
+      return action(tx);
     });
   }
 }
