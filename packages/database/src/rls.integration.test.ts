@@ -115,7 +115,7 @@ runWhenDatabase('PostgreSQL tenant isolation', () => {
     }
     try {
       const result = await fn();
-      await client.query('ROLLBACK');
+      await client.query('COMMIT');
       return result;
     } catch (error) {
       await client.query('ROLLBACK');
