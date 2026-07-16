@@ -8,7 +8,9 @@ const base = {
 
 describe('configuration validation', () => {
   it('rejects development auth in production', () => {
-    expect(() => loadConfig({ ...base, NODE_ENV: 'production', AUTH_ADAPTER: 'development' })).toThrow();
+    expect(() =>
+      loadConfig({ ...base, NODE_ENV: 'production', AUTH_ADAPTER: 'development' }),
+    ).toThrow();
   });
 
   it('rejects incomplete Auth0 configuration', () => {

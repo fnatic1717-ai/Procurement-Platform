@@ -8,12 +8,26 @@ import { AuthorizationGuard } from './authorization/authorization.guard.js';
 import { PolicyService } from './authorization/policy.js';
 import { FileAuthorizationService } from './files/files.js';
 import { HealthController } from './health/health.js';
+import {
+  ApprovalController,
+  ApprovalPolicyController,
+  IntakeController,
+  PurchaseRequestController,
+  PurchaseRequestService,
+} from './purchase-requests/purchase-requests.js';
 
 @Module({
   imports: [ThrottlerModule.forRoot([{ ttl: 60_000, limit: 120 }])],
-  controllers: [HealthController],
+  controllers: [
+    HealthController,
+    PurchaseRequestController,
+    ApprovalController,
+    IntakeController,
+    ApprovalPolicyController,
+  ],
   providers: [
     AuditService,
+    PurchaseRequestService,
     PolicyService,
     PrincipalLoader,
     authProviderFactory,

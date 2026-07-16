@@ -68,6 +68,54 @@ enum FileClassification {
   @@map("file_classification")
 }
 
+enum PurchaseRequestStatus {
+  DRAFT
+  SUBMITTED
+  PENDING_APPROVAL
+  RETURNED_TO_REQUESTER
+  REJECTED
+  APPROVED
+  WITHDRAWN
+  CANCELLED
+  IN_PROCUREMENT_REVIEW
+
+  @@map("purchase_request_status")
+}
+
+enum PurchaseItemType {
+  goods
+  services
+
+  @@map("purchase_item_type")
+}
+
+enum PurchasePriority {
+  low
+  normal
+  high
+  urgent
+
+  @@map("purchase_priority")
+}
+
+enum ApprovalDecision {
+  pending
+  approved
+  rejected
+  returned
+
+  @@map("approval_decision")
+}
+
+enum IntakeStatus {
+  unassigned
+  assigned
+  in_review
+  closed
+
+  @@map("intake_status")
+}
+
 model Tenant {
   id        String       @id @default(uuid()) @db.Uuid
   name      String
@@ -175,11 +223,11 @@ model Role {
 }
 
 model RolePermission {
-  tenantId    String   @map("tenant_id") @db.Uuid
-  roleId      String   @map("role_id") @db.Uuid
-  permissionId String  @map("permission_id") @db.Uuid
-  createdBy   String?  @map("created_by") @db.Uuid
-  createdAt   DateTime @default(now()) @map("created_at")
+  tenantId     String   @map("tenant_id") @db.Uuid
+  roleId       String   @map("role_id") @db.Uuid
+  permissionId String   @map("permission_id") @db.Uuid
+  createdBy    String?  @map("created_by") @db.Uuid
+  createdAt    DateTime @default(now()) @map("created_at")
 
   @@id([tenantId, roleId, permissionId])
   @@map("role_permissions")
@@ -252,19 +300,19 @@ model Location {
 }
 
 model AuditEvent {
-  id              String    @id @default(uuid()) @db.Uuid
-  tenantId        String?   @map("tenant_id") @db.Uuid
-  actorId         String?   @map("actor_id") @db.Uuid
-  actorType       ActorType @default(system) @map("actor_type")
-  action          String
-  objectType      String    @map("object_type")
-  objectId        String?   @map("object_id") @db.Uuid
-  correlationId   String    @map("correlation_id")
-  requestContext  Json      @default("{}") @map("request_context")
-  metadata        Json?
-  priorState      Json?     @map("prior_state")
-  resultingState  Json?     @map("resulting_state")
-  createdAt       DateTime  @default(now()) @map("created_at")
+  id             String    @id @default(uuid()) @db.Uuid
+  tenantId       String?   @map("tenant_id") @db.Uuid
+  actorId        String?   @map("actor_id") @db.Uuid
+  actorType      ActorType @default(system) @map("actor_type")
+  action         String
+  objectType     String    @map("object_type")
+  objectId       String?   @map("object_id") @db.Uuid
+  correlationId  String    @map("correlation_id")
+  requestContext Json      @default("{}") @map("request_context")
+  metadata       Json?
+  priorState     Json?     @map("prior_state")
+  resultingState Json?     @map("resulting_state")
+  createdAt      DateTime  @default(now()) @map("created_at")
 
   tenant Tenant? @relation(fields: [tenantId], references: [id])
   actor  User?   @relation(fields: [actorId], references: [id])
@@ -312,4 +360,189 @@ model FileLink {
   @@unique([tenantId, fileObjectId, objectType, objectId])
   @@index([tenantId, objectType, objectId])
   @@map("file_links")
+}
+
+model PurchaseRequest {
+  id                    String                   @id @default(uuid()) @db.Uuid
+  tenantId              String                   @map("tenant_id") @db.Uuid
+  requestNumber         String                   @map("request_number")
+  requesterId           String                   @map("requester_id") @db.Uuid
+  legalEntity           String                   @map("legal_entity")
+  department            String
+  costCenter            String                   @map("cost_center")
+  deliveryLocation      String                   @map("delivery_location")
+  procurementCategory   String                   @map("procurement_category")
+  title                 String
+  businessJustification String                   @map("business_justification")
+  currency              String                   @db.Char(3)
+  estimatedTotal        Decimal                  @map("estimated_total") @db.Decimal(20, 4)
+  requiredBy            DateTime                 @map("required_by") @db.Date
+  priority              PurchasePriority         @default(normal)
+  internalNotes         String?                  @map("internal_notes")
+  status                PurchaseRequestStatus    @default(DRAFT)
+  version               Int                      @default(1)
+  submittedAt           DateTime?                @map("submitted_at")
+  finalApprovedAt       DateTime?                @map("final_approved_at")
+  withdrawnAt           DateTime?                @map("withdrawn_at")
+  withdrawnBy           String?                  @map("withdrawn_by") @db.Uuid
+  withdrawalReason      String?                  @map("withdrawal_reason")
+  cancelledAt           DateTime?                @map("cancelled_at")
+  cancelledBy           String?                  @map("cancelled_by") @db.Uuid
+  cancellationReason    String?                  @map("cancellation_reason")
+  createdAt             DateTime                 @default(now()) @map("created_at")
+  updatedAt             DateTime                 @updatedAt @map("updated_at")
+  items                 PurchaseRequestItem[]
+  intakeRecord          ProcurementIntakeRecord?
+
+  @@unique([tenantId, requestNumber])
+  @@unique([tenantId, id])
+  @@index([tenantId, requesterId, status])
+  @@index([tenantId, status, requiredBy])
+  @@map("purchase_requests")
+}
+
+model PurchaseRequestItem {
+  id                    String           @id @default(uuid()) @db.Uuid
+  tenantId              String           @map("tenant_id") @db.Uuid
+  purchaseRequestId     String           @map("purchase_request_id") @db.Uuid
+  description           String
+  itemType              PurchaseItemType @map("item_type")
+  quantity              Decimal          @db.Decimal(20, 6)
+  unitOfMeasure         String           @map("unit_of_measure")
+  estimatedUnitPrice    Decimal          @map("estimated_unit_price") @db.Decimal(20, 4)
+  estimatedLineTotal    Decimal          @map("estimated_line_total") @db.Decimal(20, 4)
+  category              String
+  specifications        String
+  requiredBy            DateTime         @map("required_by") @db.Date
+  deliveryLocation      String           @map("delivery_location")
+  suggestedSupplierName String?          @map("suggested_supplier_name")
+  accountingDimensions  Json             @default("{}") @map("accounting_dimensions")
+  version               Int              @default(1)
+  createdAt             DateTime         @default(now()) @map("created_at")
+  updatedAt             DateTime         @updatedAt @map("updated_at")
+  request               PurchaseRequest  @relation(fields: [tenantId, purchaseRequestId], references: [tenantId, id])
+
+  @@unique([tenantId, id])
+  @@index([tenantId, purchaseRequestId])
+  @@map("purchase_request_items")
+}
+
+model ApprovalPolicy {
+  id                  String               @id @default(uuid()) @db.Uuid
+  tenantId            String               @map("tenant_id") @db.Uuid
+  name                String
+  active              Boolean              @default(true)
+  priority            Int                  @default(100)
+  minAmount           Decimal?             @map("min_amount") @db.Decimal(20, 4)
+  maxAmount           Decimal?             @map("max_amount") @db.Decimal(20, 4)
+  department          String?
+  legalEntity         String?              @map("legal_entity")
+  procurementCategory String?              @map("procurement_category")
+  currency            String?              @db.Char(3)
+  requestPriority     PurchasePriority?    @map("request_priority")
+  version             Int                  @default(1)
+  createdBy           String               @map("created_by") @db.Uuid
+  createdAt           DateTime             @default(now()) @map("created_at")
+  updatedAt           DateTime             @updatedAt @map("updated_at")
+  steps               ApprovalPolicyStep[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId, active, priority])
+  @@map("approval_policies")
+}
+
+model ApprovalPolicyStep {
+  id                   String         @id @default(uuid()) @db.Uuid
+  tenantId             String         @map("tenant_id") @db.Uuid
+  policyId             String         @map("policy_id") @db.Uuid
+  stepNumber           Int            @map("step_number")
+  approverUserId       String?        @map("approver_user_id") @db.Uuid
+  approverRoleId       String?        @map("approver_role_id") @db.Uuid
+  requiredPermission   String         @map("required_permission")
+  minThreshold         Decimal?       @map("min_threshold") @db.Decimal(20, 4)
+  maxThreshold         Decimal?       @map("max_threshold") @db.Decimal(20, 4)
+  active               Boolean        @default(true)
+  escalationAfterHours Int?           @map("escalation_after_hours")
+  createdAt            DateTime       @default(now()) @map("created_at")
+  updatedAt            DateTime       @updatedAt @map("updated_at")
+  policy               ApprovalPolicy @relation(fields: [tenantId, policyId], references: [tenantId, id])
+
+  @@unique([tenantId, policyId, stepNumber])
+  @@unique([tenantId, id])
+  @@map("approval_policy_steps")
+}
+
+model PurchaseRequestApprovalInstance {
+  id                String    @id @default(uuid()) @db.Uuid
+  tenantId          String    @map("tenant_id") @db.Uuid
+  purchaseRequestId String    @map("purchase_request_id") @db.Uuid
+  policyId          String    @map("policy_id") @db.Uuid
+  policyVersion     Int       @map("policy_version")
+  routeSnapshot     Json      @map("route_snapshot")
+  submissionKey     String    @map("submission_key")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  completedAt       DateTime? @map("completed_at")
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, purchaseRequestId, submissionKey])
+  @@index([tenantId, purchaseRequestId])
+  @@map("purchase_request_approval_instances")
+}
+
+model PurchaseRequestApprovalStep {
+  id                 String           @id @default(uuid()) @db.Uuid
+  tenantId           String           @map("tenant_id") @db.Uuid
+  instanceId         String           @map("instance_id") @db.Uuid
+  stepNumber         Int              @map("step_number")
+  approverUserId     String?          @map("approver_user_id") @db.Uuid
+  approverRoleId     String?          @map("approver_role_id") @db.Uuid
+  requiredPermission String           @map("required_permission")
+  decision           ApprovalDecision @default(pending)
+  decisionBy         String?          @map("decision_by") @db.Uuid
+  decisionAt         DateTime?        @map("decision_at")
+  comment            String?
+  idempotencyKey     String?          @map("idempotency_key")
+  version            Int              @default(1)
+  createdAt          DateTime         @default(now()) @map("created_at")
+  updatedAt          DateTime         @updatedAt @map("updated_at")
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, instanceId, stepNumber])
+  @@unique([tenantId, idempotencyKey])
+  @@index([tenantId, approverUserId, decision])
+  @@map("purchase_request_approval_steps")
+}
+
+model ProcurementIntakeRecord {
+  id                String          @id @default(uuid()) @db.Uuid
+  tenantId          String          @map("tenant_id") @db.Uuid
+  purchaseRequestId String          @map("purchase_request_id") @db.Uuid
+  status            IntakeStatus    @default(unassigned)
+  currentBuyerId    String?         @map("current_buyer_id") @db.Uuid
+  version           Int             @default(1)
+  receivedAt        DateTime        @default(now()) @map("received_at")
+  purchaseRequest   PurchaseRequest @relation(fields: [tenantId, purchaseRequestId], references: [tenantId, id])
+  createdAt         DateTime        @default(now()) @map("created_at")
+  updatedAt         DateTime        @updatedAt @map("updated_at")
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, purchaseRequestId])
+  @@index([tenantId, status, receivedAt])
+  @@map("procurement_intake_records")
+}
+
+model BuyerAssignment {
+  id             String    @id @default(uuid()) @db.Uuid
+  tenantId       String    @map("tenant_id") @db.Uuid
+  intakeRecordId String    @map("intake_record_id") @db.Uuid
+  buyerId        String    @map("buyer_id") @db.Uuid
+  assignedBy     String    @map("assigned_by") @db.Uuid
+  reason         String
+  effectiveFrom  DateTime  @default(now()) @map("effective_from")
+  effectiveUntil DateTime? @map("effective_until")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  @@unique([tenantId, id])
+  @@index([tenantId, intakeRecordId, effectiveUntil])
+  @@map("buyer_assignments")
 }

@@ -10,12 +10,17 @@ import { SafeExceptionFilter } from './security/exception.filter.js';
 import { StructuredLogger } from './security/structured-logger.js';
 
 const config = loadConfig();
-const app = await NestFactory.create(AppModule, { bufferLogs: true, logger: new StructuredLogger() });
+const app = await NestFactory.create(AppModule, {
+  bufferLogs: true,
+  logger: new StructuredLogger(),
+});
 app.use(helmet());
 app.use(correlationIdMiddleware);
 app.enableCors({ origin: config.CORS_ORIGIN, credentials: true });
 app.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });
-app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+app.useGlobalPipes(
+  new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }),
+);
 app.useGlobalFilters(new SafeExceptionFilter());
 const doc = SwaggerModule.createDocument(
   app,

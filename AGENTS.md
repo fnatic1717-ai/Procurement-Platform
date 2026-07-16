@@ -1,13 +1,16 @@
 # AGENTS.md
 
 ## Repository Instructions
+
 This repository defines a production-grade, multi-tenant B2B procurement SaaS foundation. All contributors and automation agents must preserve the MVP scope and architecture-first delivery approach.
 
 ## Language
+
 - All documentation and user-facing MVP text must be English-only.
 - Use clear business terminology for procurement, sourcing, purchasing, receiving, invoicing, and supplier performance.
 
 ## MVP Scope Guardrails
+
 Include:
 
 - Purchase requisition lifecycle.
@@ -29,6 +32,7 @@ Exclude until architecture review and approval:
 - Advanced analytics, AI recommendations, and marketplace features.
 
 ## Engineering Expectations
+
 - Maintain tenant isolation in every design and implementation decision.
 - Enforce role-based access control and workflow authorization server-side.
 - Preserve immutable audit trails for lifecycle and security-sensitive events.
@@ -37,6 +41,7 @@ Exclude until architecture review and approval:
 - Never put try/catch blocks around imports.
 
 ## Documentation Expectations
+
 - Keep documentation aligned with MVP boundaries.
 - Prefer explicit workflow states and permission rules over vague descriptions.
 - Document assumptions and future enhancements separately from MVP commitments.

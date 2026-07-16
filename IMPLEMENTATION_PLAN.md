@@ -1,6 +1,7 @@
 # Implementation Plan
 
 ## Implementation Principles
+
 - Architecture review and approval must precede application page implementation.
 - MVP scope must remain focused on the procurement lifecycle and platform foundations.
 - Each increment must include security, audit, tenant isolation, and tests.
@@ -8,6 +9,7 @@
 - Include practical operational dashboards, Excel workbooks, and PDF reports as MVP modules because they are commercial procurement requirements.
 
 ## Phase 0: Architecture Approval
+
 Deliverables:
 
 - Product requirements.
@@ -31,6 +33,7 @@ Exit criteria:
 - Implementation sequencing is accepted.
 
 ## Phase 1: Platform Foundation
+
 Build:
 
 - Tenant model.
@@ -48,6 +51,7 @@ Tests:
 - File authorization tests.
 
 ## Phase 2: Requisition and Approval
+
 Build:
 
 - Requisition and requisition line models.
@@ -63,6 +67,7 @@ Tests:
 - Audit event tests.
 
 ## Phase 3: Supplier and RFQ
+
 Build:
 
 - Supplier profile and contacts.
@@ -80,6 +85,7 @@ Tests:
 - Deadline and revision policy tests.
 
 ## Phase 4: Evaluation, Negotiation, and Award
+
 Build:
 
 - Evaluation criteria and scoring records.
@@ -95,6 +101,7 @@ Tests:
 - Audit history tests.
 
 ## Phase 5: Purchase Orders and Receiving
+
 Build:
 
 - PO generation from award or direct requisition.
@@ -111,6 +118,7 @@ Tests:
 - Supplier acknowledgement tests.
 
 ## Phase 6: Invoice Matching and Supplier Performance
+
 Build:
 
 - Invoice capture model.
@@ -126,8 +134,8 @@ Tests:
 - Supplier performance event tests.
 - Reporting permission tests.
 
-
 ## Phase 7: Reporting, Dashboards, Excel, and PDF
+
 Build:
 
 - Permission-aware procurement dashboard using real operational data.
@@ -151,11 +159,17 @@ Tests:
 - Report audit event tests.
 
 ## Phase 8: Approved Application Pages
+
 Only after architecture approval and domain foundations are accepted, implement application pages for approved workflows. Page work must use the design system and must not introduce decorative dashboards or mock operational data.
 
 ## MVP Release Criteria
+
 - End-to-end lifecycle works through approved workflow paths.
 - Tenant isolation and supplier boundaries pass tests.
 - Approval, award, PO, receipt, and invoice decisions are auditable.
 - Reporting supports practical dashboards, analytics, professional Excel, and branded PDF outputs without fake, vanity, decorative, or unsupported KPIs.
 - Deployment, backup, and monitoring procedures are validated.
+
+## Phase 2A delivery status
+
+The first operational vertical slice is implemented across PostgreSQL, NestJS, and Next.js: Purchase Request draft, policy routing, sequential approval, procurement intake, and buyer assignment. RFQ, quotation, award, and purchase-order execution remain sequenced future work.

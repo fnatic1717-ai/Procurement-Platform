@@ -38,12 +38,30 @@ export class PolicyService {
     this.memberships.set(`${fixture.tenantId}:${fixture.userId}`, fixture);
   }
 
-  async loadPrincipal(userId: string, tenantId: string, correlationId: string): Promise<AuthenticatedPrincipal> {
+  async loadPrincipal(
+    userId: string,
+    tenantId: string,
+    correlationId: string,
+  ): Promise<AuthenticatedPrincipal> {
     const membership = this.memberships.get(`${tenantId}:${userId}`);
     if (!membership || membership.status !== 'active') {
-      return { userId, tenantId, actorType: 'internal_user', permissions: [], correlationId, activeMembership: false };
+      return {
+        userId,
+        tenantId,
+        actorType: 'internal_user',
+        permissions: [],
+        correlationId,
+        activeMembership: false,
+      };
     }
-    return { userId, tenantId, actorType: 'internal_user', permissions: membership.permissions, correlationId, activeMembership: true };
+    return {
+      userId,
+      tenantId,
+      actorType: 'internal_user',
+      permissions: membership.permissions,
+      correlationId,
+      activeMembership: true,
+    };
   }
 
   can(principal: AuthenticatedPrincipal | null, req: AuthorizationRequest): boolean {
@@ -78,7 +96,10 @@ export class PolicyService {
     if (!override.justification.trim()) return false;
     const approver = override.independentApprover;
     if (!approver || approver.userId === conflictedPrincipal.userId) return false;
-    if (!this.can(approver, { tenantId: override.tenantId, permission: override.requiredPermission })) return false;
+    if (
+      !this.can(approver, { tenantId: override.tenantId, permission: override.requiredPermission })
+    )
+      return false;
     await this.audit?.append({
       tenantId: override.tenantId,
       actorId: approver.userId,
@@ -87,7 +108,10 @@ export class PolicyService {
       objectType: override.objectType,
       objectId: override.objectId,
       correlationId: override.correlationId,
-      metadata: { justification: override.justification, conflictedActorId: conflictedPrincipal.userId },
+      metadata: {
+        justification: override.justification,
+        conflictedActorId: conflictedPrincipal.userId,
+      },
     });
     return true;
   }
