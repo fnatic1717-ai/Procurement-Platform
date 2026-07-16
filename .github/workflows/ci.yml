@@ -44,43 +44,63 @@ jobs:
           node-version: 22
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      - name: Prepare logs
+        run: mkdir -p ci-logs
 
       - name: Database migration
         id: migrate
         continue-on-error: true
-        run: pnpm db:migrate
+        run: |
+          set -o pipefail
+          pnpm db:migrate 2>&1 | tee ci-logs/migration.log
       - name: Format check
         id: format
         continue-on-error: true
-        run: pnpm format:check
+        run: |
+          set -o pipefail
+          pnpm format:check 2>&1 | tee ci-logs/format.log
       - name: Lint
         id: lint
         continue-on-error: true
-        run: pnpm lint
+        run: |
+          set -o pipefail
+          pnpm lint 2>&1 | tee ci-logs/lint.log
       - name: Typecheck
         id: typecheck
         continue-on-error: true
-        run: pnpm typecheck
+        run: |
+          set -o pipefail
+          pnpm typecheck 2>&1 | tee ci-logs/typecheck.log
       - name: Unit tests
         id: test
         continue-on-error: true
-        run: pnpm test
+        run: |
+          set -o pipefail
+          pnpm test 2>&1 | tee ci-logs/unit-tests.log
       - name: Integration tests
         id: integration
         continue-on-error: true
-        run: pnpm test:integration
+        run: |
+          set -o pipefail
+          pnpm test:integration 2>&1 | tee ci-logs/integration-tests.log
       - name: Build
         id: build
         continue-on-error: true
-        run: pnpm build
+        run: |
+          set -o pipefail
+          pnpm build 2>&1 | tee ci-logs/build.log
       - name: Database validation
         id: dbvalidate
         continue-on-error: true
-        run: pnpm db:validate
+        run: |
+          set -o pipefail
+          pnpm db:validate 2>&1 | tee ci-logs/database-validation.log
       - name: Dependency audit
         id: audit
         continue-on-error: true
-        run: pnpm audit:deps
+        run: |
+          set -o pipefail
+          pnpm audit:deps 2>&1 | tee ci-logs/dependency-audit.log
       - name: Secret scan
         id: gitleaks
         continue-on-error: true
@@ -91,7 +111,7 @@ jobs:
       - name: Create quality summary
         if: always()
         run: |
-          cat > quality-summary.txt <<'EOF'
+          cat > ci-logs/quality-summary.txt <<'EOF'
           migration=${{ steps.migrate.outcome }}
           format=${{ steps.format.outcome }}
           lint=${{ steps.lint.outcome }}
@@ -103,18 +123,18 @@ jobs:
           dependency_audit=${{ steps.audit.outcome }}
           secret_scan=${{ steps.gitleaks.outcome }}
           EOF
-          cat quality-summary.txt
+          cat ci-logs/quality-summary.txt
 
-      - name: Upload quality summary
+      - name: Upload CI diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: quality-summary
-          path: quality-summary.txt
+          name: ci-diagnostics
+          path: ci-logs
 
       - name: Final quality gate
         if: always()
         run: |
-          if grep -Eq '^(migration|lint|typecheck|unit_tests|integration_tests|build|database_validation|dependency_audit|secret_scan)=(failure|cancelled|skipped)$' quality-summary.txt; then
+          if grep -Eq '^(migration|lint|typecheck|unit_tests|integration_tests|build|database_validation|dependency_audit|secret_scan)=(failure|cancelled|skipped)$' ci-logs/quality-summary.txt; then
             exit 1
           fi
