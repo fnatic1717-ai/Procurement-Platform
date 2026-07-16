@@ -1,5 +1,9 @@
 name: CI
 on: [push, pull_request]
+
+permissions:
+  contents: write
+
 jobs:
   foundation:
     runs-on: ubuntu-latest
@@ -38,11 +42,23 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: pnpm install --no-frozen-lockfile
-      - uses: actions/upload-artifact@v4
-        with:
-          name: generated-pnpm-lock
-          path: pnpm-lock.yaml
+      - name: Install dependencies
+        run: |
+          if [ -f pnpm-lock.yaml ]; then
+            pnpm install --frozen-lockfile
+          else
+            pnpm install --no-frozen-lockfile
+          fi
+      - name: Commit generated lockfile
+        if: github.event_name == 'push'
+        run: |
+          if [ -n "$(git status --porcelain -- pnpm-lock.yaml)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add pnpm-lock.yaml
+            git commit -m "chore: generate pnpm lockfile"
+            git push
+          fi
       - run: pnpm db:migrate
       - run: pnpm format:check
       - run: pnpm lint
