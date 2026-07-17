@@ -1,12 +1,14 @@
 # Security Architecture
 
 ## Security Objectives
+
 - Enforce tenant isolation across users, suppliers, records, files, reports, dashboards, jobs, and audit logs.
 - Protect confidential procurement data including prices, supplier offers, budgets, evaluations, negotiations, financial terms, and approval decisions.
 - Provide auditable access, decisions, administrative actions, report generation, and downloads.
 - Support enterprise security expectations from the MVP.
 
 ## Identity and Authentication
+
 MVP authentication uses Auth0 Organizations with OIDC support and secure application sessions.
 
 Controls:
@@ -19,6 +21,7 @@ Controls:
 - Brute-force protection, login rate limiting, suspicious login monitoring, and account lockout or step-up verification.
 
 ## Authorization
+
 Authorization is deny-by-default and enforced server-side for every API, job, file, report, and dashboard request.
 
 Authorization inputs:
@@ -39,6 +42,7 @@ Segregation-of-duties controls:
 - Any exceptional override requires explicit tenant policy, written justification, additional approval by an independent authorized approver, and immutable audit logging.
 
 ## Database-Enforced Tenant Isolation
+
 - PostgreSQL row-level security must be enabled for tenant-owned tables.
 - Every tenant-owned table must include `tenant_id` with foreign key constraints where applicable.
 - Database sessions must set tenant context for request and background job execution.
@@ -47,6 +51,7 @@ Segregation-of-duties controls:
 - Administrative maintenance paths must be separated, restricted, logged, and reviewed.
 
 ## Application and Browser Security
+
 - CSRF protection is required for cookie-authenticated state-changing requests.
 - Content Security Policy must restrict script, style, image, frame, and connection sources to approved origins.
 - Security headers must include HSTS, X-Content-Type-Options, Referrer-Policy, frame protections, and permissions policy.
@@ -55,6 +60,7 @@ Segregation-of-duties controls:
 - Rate limiting must protect authentication, supplier invitation, quotation submission, report generation, file download, and public callback endpoints.
 
 ## File and Object Storage Security
+
 - Object storage must be private by default.
 - File downloads must use signed temporary URLs issued only after a fresh authorization check.
 - Uploads must validate file type, extension, MIME type, size, tenant scope, object link, and malware scan result.
@@ -63,6 +69,7 @@ Segregation-of-duties controls:
 - Supplier-uploaded files must not be executable and must be isolated from internal-only files.
 
 ## Data Protection, Secrets, and Keys
+
 - Encrypt data in transit with TLS 1.2 or higher, with TLS 1.3 preferred.
 - Encrypt database, backups, queues, caches where supported, and object storage at rest using managed keys.
 - Store secrets in AWS Secrets Manager or an equivalent managed secret store, never in source code or CI logs.
@@ -70,6 +77,7 @@ Segregation-of-duties controls:
 - Use least-privilege IAM roles for application services, background workers, CI/CD, and operators.
 
 ## Audit-Log Tamper Resistance
+
 - Audit events must be append-only at the application layer.
 - Audit tables should restrict updates and deletes to controlled retention operations.
 - Audit events must include actor, tenant, object, action, prior state, resulting state, timestamp, correlation ID, IP or network context where appropriate, policy version, and report template version where relevant.
@@ -77,11 +85,13 @@ Segregation-of-duties controls:
 - Administrative access to audit logs must itself be audited.
 
 ## Logging and Redaction
+
 - Logs must redact secrets, tokens, passwords, session IDs, signed URLs, supplier quotation prices where not required, invoice details where not required, and personal data beyond operational necessity.
 - Structured logs must include correlation IDs and tenant-safe identifiers.
 - Error messages shown to users must be safe and must not reveal object existence across tenant or supplier boundaries.
 
 ## Security Testing and Scanning
+
 Required automated checks:
 
 - Tenant-isolation tests across operational records, reports, jobs, and files.
@@ -94,6 +104,7 @@ Required automated checks:
 - Infrastructure-as-code scanning when infrastructure definitions are added.
 
 ## Backup, Restore, Disaster Recovery, and Incident Response
+
 - Production database and object storage backups must be encrypted and retained according to approved policy.
 - Restore procedures must be tested before production launch and on a recurring schedule.
 - Recovery time objective and recovery point objective must be approved before launch.
@@ -101,4 +112,5 @@ Required automated checks:
 - Disaster recovery runbooks must cover database restore, object storage restore, identity provider outage, report job backlog, and credential compromise.
 
 ## MVP Boundaries
+
 MVP security includes implementation-level controls for tenant isolation, RLS, RBAC, secure sessions, CSRF, security headers, rate limiting, private files, signed URLs, malware scanning, audit tamper resistance, redaction, scanning, backup, restore, disaster recovery, incident response, and automated security tests.

@@ -24,7 +24,7 @@ export class AuditService {
       VALUES (
         ${event.tenantId ?? null}::uuid,
         ${event.actorId ?? null}::uuid,
-        ${(event.actorType ?? 'system')}::actor_type,
+        ${event.actorType ?? 'system'}::actor_type,
         ${event.action},
         ${event.objectType},
         ${event.objectId ?? null}::uuid,

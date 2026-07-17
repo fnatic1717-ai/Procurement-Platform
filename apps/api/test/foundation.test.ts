@@ -10,27 +10,52 @@ const principal = {
   correlationId: 'c1',
   activeMembership: true,
 };
-const independentApprover = { ...principal, userId: '00000000-0000-0000-0000-000000000002', permissions: ['approval.override'] };
+const independentApprover = {
+  ...principal,
+  userId: '00000000-0000-0000-0000-000000000002',
+  permissions: ['approval.override'],
+};
 
 describe('authorization foundation', () => {
   const policy = new PolicyService({ append: async () => undefined } as never);
 
   it('denies by default and allows explicit trusted permission', () => {
-    expect(policy.can(null, { tenantId: principal.tenantId, permission: 'tenant.manage' })).toBe(false);
-    expect(policy.can({ ...principal, activeMembership: false }, { tenantId: principal.tenantId, permission: 'tenant.manage' })).toBe(false);
-    expect(policy.can(principal, { tenantId: '20000000-0000-0000-0000-000000000002', permission: 'tenant.manage' })).toBe(false);
-    expect(policy.can(principal, { tenantId: principal.tenantId, permission: 'tenant.manage' })).toBe(true);
+    expect(policy.can(null, { tenantId: principal.tenantId, permission: 'tenant.manage' })).toBe(
+      false,
+    );
+    expect(
+      policy.can(
+        { ...principal, activeMembership: false },
+        { tenantId: principal.tenantId, permission: 'tenant.manage' },
+      ),
+    ).toBe(false);
+    expect(
+      policy.can(principal, {
+        tenantId: '20000000-0000-0000-0000-000000000002',
+        permission: 'tenant.manage',
+      }),
+    ).toBe(false);
+    expect(
+      policy.can(principal, { tenantId: principal.tenantId, permission: 'tenant.manage' }),
+    ).toBe(true);
   });
 
   it('loads permissions from trusted membership fixtures', async () => {
-    policy.registerMembership({ userId: principal.userId, tenantId: principal.tenantId, status: 'active', permissions: ['roles.manage'] });
+    policy.registerMembership({
+      userId: principal.userId,
+      tenantId: principal.tenantId,
+      status: 'active',
+      permissions: ['roles.manage'],
+    });
     const loaded = await policy.loadPrincipal(principal.userId, principal.tenantId, 'correlation');
     expect(loaded.permissions).toEqual(['roles.manage']);
     expect(loaded.activeMembership).toBe(true);
   });
 
   it('enforces segregation of duties with policy, independent approver, permission, audit, and justification', async () => {
-    await expect(policy.enforceRequesterCannotApproveOwn(principal, principal.userId)).resolves.toBe(false);
+    await expect(
+      policy.enforceRequesterCannotApproveOwn(principal, principal.userId),
+    ).resolves.toBe(false);
     await expect(
       policy.enforceRequesterCannotApproveOwn(principal, principal.userId, {
         tenantId: principal.tenantId,
@@ -61,10 +86,36 @@ describe('file authorization', () => {
       linkedObjectType: 'foundation',
       linkedObjectId: '40000000-0000-0000-0000-000000000004',
     };
-    expect(files.canRead(principal, file, { type: 'foundation', id: file.linkedObjectId })).toBe(true);
-    expect(files.canRead(principal, { ...file, tenantId: 'other' }, { type: 'foundation', id: file.linkedObjectId })).toBe(false);
-    expect(files.canRead(principal, { ...file, scanStatus: 'pending' }, { type: 'foundation', id: file.linkedObjectId })).toBe(false);
-    expect(files.canRead(principal, { ...file, classification: 'restricted' }, { type: 'foundation', id: file.linkedObjectId })).toBe(false);
-    expect(files.canRead({ ...principal, permissions: ['files.restricted.read'] }, { ...file, classification: 'restricted' }, { type: 'foundation', id: file.linkedObjectId })).toBe(true);
+    expect(files.canRead(principal, file, { type: 'foundation', id: file.linkedObjectId })).toBe(
+      true,
+    );
+    expect(
+      files.canRead(
+        principal,
+        { ...file, tenantId: 'other' },
+        { type: 'foundation', id: file.linkedObjectId },
+      ),
+    ).toBe(false);
+    expect(
+      files.canRead(
+        principal,
+        { ...file, scanStatus: 'pending' },
+        { type: 'foundation', id: file.linkedObjectId },
+      ),
+    ).toBe(false);
+    expect(
+      files.canRead(
+        principal,
+        { ...file, classification: 'restricted' },
+        { type: 'foundation', id: file.linkedObjectId },
+      ),
+    ).toBe(false);
+    expect(
+      files.canRead(
+        { ...principal, permissions: ['files.restricted.read'] },
+        { ...file, classification: 'restricted' },
+        { type: 'foundation', id: file.linkedObjectId },
+      ),
+    ).toBe(true);
   });
 });

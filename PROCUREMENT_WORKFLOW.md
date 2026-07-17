@@ -1,12 +1,14 @@
 # Procurement Workflow
 
 ## Workflow Principles
+
 - Every procurement object must have an explicit state machine.
 - State transitions must be authorized, validated, auditable, and tenant-scoped.
 - Human decisions must preserve actor, timestamp, comments, prior state, resulting state, and policy context.
 - System automation may recommend routing but must not silently bypass required approvals.
 
 ## End-to-End Lifecycle
+
 1. Purchase need is identified by a requester.
 2. Purchase requisition is drafted and submitted.
 3. Approval workflow validates need, budget, authority, and policy compliance.
@@ -25,6 +27,7 @@
 16. Supplier performance events are updated.
 
 ## Requisition State Model
+
 - Draft: editable by requester.
 - Submitted: locked from requester edits except withdrawal where permitted.
 - Under Review: active approval routing exists.
@@ -35,6 +38,7 @@
 - Converted: linked to RFQ or PO.
 
 ## RFQ State Model
+
 - Draft: buyer prepares sourcing event.
 - Published: suppliers are invited and can access the RFQ.
 - Clarification Open: questions and responses are managed.
@@ -47,6 +51,7 @@
 - Cancelled: sourcing event is terminated.
 
 ## Purchase Order State Model
+
 - Draft: generated but not issued.
 - Pending Approval: PO awaits authorization.
 - Approved: PO can be issued.
@@ -59,6 +64,7 @@
 - Amended: current PO version supersedes prior version.
 
 ## Invoice Matching State Model
+
 - Received: invoice data is captured.
 - Matching: invoice is compared with PO and goods receipt.
 - Matched: invoice passes configured checks.
@@ -67,6 +73,7 @@
 - Rejected: invoice is not payable.
 
 ## Approval Routing Rules
+
 MVP routing inputs include:
 
 - Tenant.
@@ -89,6 +96,7 @@ Routing outputs include:
 - Whether finance review is required.
 
 ## Exception Handling
+
 - Budget exception: route to finance and budget owner.
 - Supplier compliance exception: route to procurement manager.
 - RFQ deadline exception: require buyer justification and audit record.
@@ -97,4 +105,9 @@ Routing outputs include:
 - Invoice quantity exception: route to receiving user, buyer, and finance.
 
 ## MVP Boundaries
+
 The workflow documentation defines states and transitions for procurement execution and supports practical analytics from real operational data. It does not approve building decorative, fake, vanity, or unsupported KPIs, mock data flows, or application pages before architecture approval.
+
+## Phase 2A implemented workflow
+
+The implemented vertical slice maps draft submission to `PENDING_APPROVAL`, processes ordered current steps, and resolves to return, rejection, or final approval. Final approval creates the procurement intake record in the same transaction. Buyer assignment preserves effective-dated history; RFQ and later sourcing execution remain future phases.
