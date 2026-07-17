@@ -139,6 +139,16 @@ runWhenDatabase('PostgreSQL tenant isolation', () => {
     }
   }
 
+  async function asInternalTenant<T>(tenantId: string, fn: () => Promise<T>): Promise<T> {
+    return asTenant(tenantId, async () => {
+      const context = await client.query(
+        "SELECT set_config('app.actor_type','internal_user',true) actor_type, current_setting('app.current_tenant_id',true) tenant_id",
+      );
+      expect(context.rows).toEqual([{ actor_type: 'internal_user', tenant_id: tenantId }]);
+      return fn();
+    });
+  }
+
   it('allows Tenant A to read and write its own records', async () => {
     const rows = await asTenant(tenantA, async () =>
       client.query('SELECT id FROM file_objects WHERE tenant_id = $1', [tenantA]),
@@ -356,8 +366,7 @@ runWhenDatabase('PostgreSQL tenant isolation', () => {
   });
 
   it('denies competing supplier invitations and quotations for a restricted supplier context', async () => {
-    const seeded = await asTenant(tenantA, async () => {
-      await client.query("SELECT set_config('app.actor_type', 'internal_user', true)");
+    const seeded = await asInternalTenant(tenantA, async () => {
       const supplierUsers = await client.query(
         "INSERT INTO users(email,display_name,actor_type) VALUES('supplier-a@example.com','Supplier User A','supplier_user'),('supplier-b@example.com','Supplier User B','supplier_user') RETURNING id",
       );
@@ -390,7 +399,9 @@ runWhenDatabase('PostgreSQL tenant isolation', () => {
       const quotationIds: string[] = [];
       const invitationIds: string[] = [];
       const lineIds: string[] = [];
-      for (const supplier of suppliers.rows) {
+      const attachmentIds: string[] = [];
+      const fileIds: string[] = [];
+      for (const [index, supplier] of suppliers.rows.entries()) {
         const invitation = await client.query(
           "INSERT INTO rfq_supplier_invitations(tenant_id,rfq_id,supplier_id,status,expires_at) VALUES($1,$2,$3,'ACCEPTED',now()+interval '1 day') RETURNING id",
           [tenantA, rfq.rows[0].id, supplier.id],
@@ -405,12 +416,29 @@ runWhenDatabase('PostgreSQL tenant isolation', () => {
         );
         invitationIds.push(invitation.rows[0].id);
         quotationIds.push(quotation.rows[0].id);
+        const file = await client.query(
+          "INSERT INTO file_objects(tenant_id,storage_key,filename,mime_type,size_bytes,checksum_sha256,uploader_id,classification,upload_state,scan_status) VALUES($1,$2,$3,'application/pdf',10,$4,$5,'supplier_visible','clean','clean') RETURNING id",
+          [
+            tenantA,
+            `supplier/${supplier.id}/quotation.pdf`,
+            `quotation-${index + 1}.pdf`,
+            String(index + 1).repeat(64),
+            supplierUsers.rows[index].id,
+          ],
+        );
+        const attachment = await client.query(
+          'INSERT INTO quotation_attachments(tenant_id,quotation_id,file_object_id) VALUES($1,$2,$3) RETURNING id',
+          [tenantA, quotation.rows[0].id, file.rows[0].id],
+        );
         lineIds.push(line.rows[0].id);
+        fileIds.push(file.rows[0].id);
+        attachmentIds.push(attachment.rows[0].id);
       }
       return {
         supplierA: suppliers.rows[0].id,
         supplierB: suppliers.rows[1].id,
         supplierUserA: supplierUsers.rows[0].id,
+        supplierUserB: supplierUsers.rows[1].id,
         rfqId: rfq.rows[0].id,
         rfqLineId: rfqLine.rows[0].id,
         ownInvitation: invitationIds[0],
@@ -419,12 +447,19 @@ runWhenDatabase('PostgreSQL tenant isolation', () => {
         competingQuotation: quotationIds[1],
         ownLine: lineIds[0],
         competingLine: lineIds[1],
+        ownAttachment: attachmentIds[0],
+        competingAttachment: attachmentIds[1],
+        ownFile: fileIds[0],
+        competingFile: fileIds[1],
       };
     });
 
     async function asPersistedSupplier<T>(work: () => Promise<T>): Promise<T> {
       return asTenant(tenantA, async () => {
-        await client.query("SELECT set_config('app.actor_type','supplier_user',true)");
+        await client.query(
+          "SELECT set_config('app.actor_type','supplier_user',true),set_config('app.current_actor_id',$1,true)",
+          [seeded.supplierUserA],
+        );
         const membership = await client.query(
           'SELECT supplier_id FROM supplier_user_memberships WHERE user_id=$1 AND active=true',
           [seeded.supplierUserA],
@@ -441,10 +476,16 @@ runWhenDatabase('PostgreSQL tenant isolation', () => {
       invitations: await client.query('SELECT id FROM rfq_supplier_invitations'),
       quotations: await client.query('SELECT id FROM quotations'),
       lines: await client.query('SELECT id FROM quotation_lines'),
+      attachments: await client.query('SELECT id,file_object_id FROM quotation_attachments'),
+      files: await client.query("SELECT id FROM file_objects WHERE storage_key LIKE 'supplier/%'"),
     }));
     expect(own.invitations.rows).toEqual([{ id: seeded.ownInvitation }]);
     expect(own.quotations.rows).toEqual([{ id: seeded.ownQuotation }]);
     expect(own.lines.rows).toEqual([{ id: seeded.ownLine }]);
+    expect(own.attachments.rows).toEqual([
+      { id: seeded.ownAttachment, file_object_id: seeded.ownFile },
+    ]);
+    expect(own.files.rows).toEqual([{ id: seeded.ownFile }]);
 
     await expect(
       asPersistedSupplier(() =>
@@ -487,6 +528,40 @@ runWhenDatabase('PostgreSQL tenant isolation', () => {
         client.query('UPDATE quotation_lines SET unit_price=1 WHERE id=$1', [seeded.competingLine]),
       ),
     ).toMatchObject({ rowCount: 0 });
+    expect(
+      await asPersistedSupplier(() =>
+        client.query('DELETE FROM quotation_attachments WHERE id=$1', [seeded.competingAttachment]),
+      ),
+    ).toMatchObject({ rowCount: 0 });
+    await expect(
+      asPersistedSupplier(() =>
+        client.query(
+          'INSERT INTO quotation_attachments(tenant_id,quotation_id,file_object_id) VALUES($1,$2,$3)',
+          [tenantA, seeded.competingQuotation, seeded.competingFile],
+        ),
+      ),
+    ).rejects.toMatchObject({ code: '42501' });
+    expect(
+      await asPersistedSupplier(() =>
+        client.query('UPDATE file_objects SET filename=$1 WHERE id=$2', [
+          'tampered.pdf',
+          seeded.competingFile,
+        ]),
+      ),
+    ).toMatchObject({ rowCount: 0 });
+    expect(
+      await asPersistedSupplier(() =>
+        client.query('DELETE FROM file_objects WHERE id=$1', [seeded.competingFile]),
+      ),
+    ).toMatchObject({ rowCount: 0 });
+    await expect(
+      asPersistedSupplier(() =>
+        client.query(
+          "INSERT INTO file_objects(tenant_id,storage_key,filename,mime_type,size_bytes,checksum_sha256,uploader_id,classification,upload_state,scan_status) VALUES($1,'supplier/attack','attack.pdf','application/pdf',1,repeat('a',64),$2,'supplier_visible','clean','clean')",
+          [tenantA, seeded.supplierUserB],
+        ),
+      ),
+    ).rejects.toMatchObject({ code: '42501' });
     await expect(
       asPersistedSupplier(() =>
         client.query(

@@ -55,3 +55,26 @@ DROP POLICY tenant_isolation ON quotation_revisions;
 CREATE POLICY tenant_and_supplier_isolation ON quotation_revisions USING (tenant_id=NULLIF(current_setting('app.current_tenant_id',true),'')::uuid AND (current_setting('app.actor_type',true)<>'supplier_user' OR EXISTS(SELECT 1 FROM quotations q WHERE q.id=quotation_id AND q.supplier_id=NULLIF(current_setting('app.current_supplier_id',true),'')::uuid)));
 DROP POLICY tenant_isolation ON quotation_attachments;
 CREATE POLICY tenant_and_supplier_isolation ON quotation_attachments USING (tenant_id=NULLIF(current_setting('app.current_tenant_id',true),'')::uuid AND (current_setting('app.actor_type',true)<>'supplier_user' OR EXISTS(SELECT 1 FROM quotations q WHERE q.id=quotation_id AND q.supplier_id=NULLIF(current_setting('app.current_supplier_id',true),'')::uuid)));
+-- Supplier actors may see only files they uploaded or files attached to their own quotation; internal file workflows retain tenant access.
+DROP POLICY tenant_isolation ON file_objects;
+CREATE POLICY file_select_scope ON file_objects FOR SELECT USING (
+  tenant_id=NULLIF(current_setting('app.current_tenant_id',true),'')::uuid
+  AND (current_setting('app.actor_type',true) IS DISTINCT FROM 'supplier_user'
+    OR uploader_id=NULLIF(current_setting('app.current_actor_id',true),'')::uuid
+    OR EXISTS (SELECT 1 FROM quotation_attachments qa JOIN quotations q ON q.tenant_id=qa.tenant_id AND q.id=qa.quotation_id WHERE qa.tenant_id=file_objects.tenant_id AND qa.file_object_id=file_objects.id AND q.supplier_id=NULLIF(current_setting('app.current_supplier_id',true),'')::uuid))
+);
+CREATE POLICY file_insert_scope ON file_objects FOR INSERT WITH CHECK (
+  tenant_id=NULLIF(current_setting('app.current_tenant_id',true),'')::uuid
+  AND (current_setting('app.actor_type',true) IS DISTINCT FROM 'supplier_user' OR uploader_id=NULLIF(current_setting('app.current_actor_id',true),'')::uuid)
+);
+CREATE POLICY file_update_scope ON file_objects FOR UPDATE USING (
+  tenant_id=NULLIF(current_setting('app.current_tenant_id',true),'')::uuid
+  AND (current_setting('app.actor_type',true) IS DISTINCT FROM 'supplier_user' OR uploader_id=NULLIF(current_setting('app.current_actor_id',true),'')::uuid)
+) WITH CHECK (
+  tenant_id=NULLIF(current_setting('app.current_tenant_id',true),'')::uuid
+  AND (current_setting('app.actor_type',true) IS DISTINCT FROM 'supplier_user' OR uploader_id=NULLIF(current_setting('app.current_actor_id',true),'')::uuid)
+);
+CREATE POLICY file_delete_scope ON file_objects FOR DELETE USING (
+  tenant_id=NULLIF(current_setting('app.current_tenant_id',true),'')::uuid
+  AND (current_setting('app.actor_type',true) IS DISTINCT FROM 'supplier_user' OR uploader_id=NULLIF(current_setting('app.current_actor_id',true),'')::uuid)
+);

@@ -186,7 +186,7 @@ export class SourcingService {
   constructor(private readonly audit: AuditService) {}
   private tx<T>(p: AuthenticatedPrincipal, fn: (tx: TransactionClient) => Promise<T>) {
     return prisma.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT set_config('app.current_tenant_id',${p.tenantId},true),set_config('app.actor_type',${p.actorType},true)`;
+      await tx.$executeRaw`SELECT set_config('app.current_tenant_id',${p.tenantId},true),set_config('app.actor_type',${p.actorType},true),set_config('app.current_actor_id',${p.userId},true)`;
       return fn(tx);
     });
   }
