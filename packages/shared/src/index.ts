@@ -7,7 +7,56 @@ export const PLATFORM_PERMISSIONS = [
   'files.restricted.read',
   'files.write',
   'platform.tenants.manage',
+  'purchase_requests.create',
+  'purchase_requests.read_own',
+  'purchase_requests.read_all',
+  'purchase_requests.update_own_draft',
+  'purchase_requests.submit',
+  'purchase_requests.withdraw',
+  'purchase_requests.cancel',
+  'approvals.read_assigned',
+  'approvals.act',
+  'procurement_intake.read',
+  'procurement_intake.assign',
+  'approval_policies.manage',
 ] as const;
+
+export const PURCHASE_REQUEST_STATUSES = [
+  'DRAFT',
+  'SUBMITTED',
+  'PENDING_APPROVAL',
+  'RETURNED_TO_REQUESTER',
+  'REJECTED',
+  'APPROVED',
+  'WITHDRAWN',
+  'CANCELLED',
+  'IN_PROCUREMENT_REVIEW',
+] as const;
+export type PurchaseRequestStatus = (typeof PURCHASE_REQUEST_STATUSES)[number];
+
+const transitions: Readonly<Record<PurchaseRequestStatus, readonly PurchaseRequestStatus[]>> = {
+  DRAFT: ['SUBMITTED', 'CANCELLED'],
+  SUBMITTED: ['PENDING_APPROVAL', 'WITHDRAWN', 'CANCELLED'],
+  PENDING_APPROVAL: ['RETURNED_TO_REQUESTER', 'REJECTED', 'APPROVED', 'WITHDRAWN', 'CANCELLED'],
+  RETURNED_TO_REQUESTER: ['SUBMITTED', 'WITHDRAWN', 'CANCELLED'],
+  REJECTED: [],
+  APPROVED: ['IN_PROCUREMENT_REVIEW', 'CANCELLED'],
+  WITHDRAWN: [],
+  CANCELLED: [],
+  IN_PROCUREMENT_REVIEW: [],
+};
+
+export function assertPurchaseRequestTransition(
+  from: PurchaseRequestStatus,
+  to: PurchaseRequestStatus,
+): void {
+  if (!transitions[from].includes(to))
+    throw new Error(`Illegal purchase request transition: ${from} -> ${to}`);
+}
+
+export function isPurchaseRequestEditable(status: PurchaseRequestStatus): boolean {
+  return status === 'DRAFT' || status === 'RETURNED_TO_REQUESTER';
+}
 
 export type PlatformPermission = (typeof PLATFORM_PERMISSIONS)[number];
 export type ActorType = 'internal_user' | 'supplier_user' | 'platform_admin' | 'system';
@@ -33,7 +82,8 @@ export function redactSensitive(value: unknown): unknown {
   if (!value || typeof value !== 'object') return value;
   return Object.fromEntries(
     Object.entries(value as Record<string, unknown>).map(([key, nested]) => {
-      if (/token|secret|password|cookie|authorization|signedUrl|session/i.test(key)) return [key, '[REDACTED]'];
+      if (/token|secret|password|cookie|authorization|signedUrl|session/i.test(key))
+        return [key, '[REDACTED]'];
       return [key, typeof nested === 'object' ? redactSensitive(nested) : nested];
     }),
   );

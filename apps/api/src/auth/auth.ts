@@ -13,7 +13,9 @@ export interface AuthProvider {
 
 @Injectable()
 export class DevelopmentAuthProvider implements AuthProvider {
-  async authenticate(authorizationHeader?: string): Promise<{ userId: string; subject: string } | null> {
+  async authenticate(
+    authorizationHeader?: string,
+  ): Promise<{ userId: string; subject: string } | null> {
     if (!authorizationHeader?.startsWith('Bearer dev:')) return null;
     const userId = authorizationHeader.slice('Bearer dev:'.length).trim();
     if (!/^[0-9a-fA-F-]{36}$/.test(userId)) return null;
@@ -24,9 +26,13 @@ export class DevelopmentAuthProvider implements AuthProvider {
 @Injectable()
 export class Auth0AuthProvider implements AuthProvider {
   constructor(private readonly config: AppConfig) {}
-  async authenticate(authorizationHeader?: string): Promise<{ userId: string; subject: string } | null> {
+  async authenticate(
+    authorizationHeader?: string,
+  ): Promise<{ userId: string; subject: string } | null> {
     if (!authorizationHeader?.startsWith('Bearer ')) return null;
-    throw new UnauthorizedException('Auth0 token validation is configured but not yet connected to a JWKS verifier');
+    throw new UnauthorizedException(
+      'Auth0 token validation is configured but not yet connected to a JWKS verifier',
+    );
   }
 }
 
@@ -43,7 +49,11 @@ export const authProviderFactory: Provider = {
 @Injectable()
 export class PrincipalLoader {
   constructor(private readonly policies: PolicyService) {}
-  async load(authenticated: { userId: string; subject: string }, tenantId: string, correlationId: string): Promise<AuthenticatedPrincipal> {
+  async load(
+    authenticated: { userId: string; subject: string },
+    tenantId: string,
+    correlationId: string,
+  ): Promise<AuthenticatedPrincipal> {
     return this.policies.loadPrincipal(authenticated.userId, tenantId, correlationId);
   }
 }

@@ -1,4 +1,9 @@
-import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode, SelectHTMLAttributes } from 'react';
+import type {
+  ButtonHTMLAttributes,
+  InputHTMLAttributes,
+  ReactNode,
+  SelectHTMLAttributes,
+} from 'react';
 
 export const tokens = {
   colorBgApp: '#F6F8FB',
@@ -21,7 +26,11 @@ export const tokens = {
 };
 
 export function Button({ children, ...props }: ButtonHTMLAttributes<HTMLButtonElement>) {
-  return <button className="pp-button" {...props}>{children}</button>;
+  return (
+    <button className="pp-button" {...props}>
+      {children}
+    </button>
+  );
 }
 
 export function Input(props: InputHTMLAttributes<HTMLInputElement>) {
@@ -29,29 +38,68 @@ export function Input(props: InputHTMLAttributes<HTMLInputElement>) {
 }
 
 export function Select({ children, ...props }: SelectHTMLAttributes<HTMLSelectElement>) {
-  return <select className="pp-select" {...props}>{children}</select>;
+  return (
+    <select className="pp-select" {...props}>
+      {children}
+    </select>
+  );
 }
 
-export function StatusBadge({ children, tone = 'info' }: { children: ReactNode; tone?: 'success' | 'warning' | 'danger' | 'info' }) {
+export function StatusBadge({
+  children,
+  tone = 'info',
+}: {
+  children: ReactNode;
+  tone?: 'success' | 'warning' | 'danger' | 'info';
+}) {
   return <span className={`pp-status-badge pp-status-badge--${tone}`}>{children}</span>;
 }
 
 export function Table({ children }: { children: ReactNode }) {
-  return <div className="pp-table-wrapper"><table className="pp-table">{children}</table></div>;
+  return (
+    <div className="pp-table-wrapper">
+      <table className="pp-table">{children}</table>
+    </div>
+  );
 }
 
 export function LoadingState({ label = 'Loading' }: { label?: string }) {
-  return <div className="pp-state" aria-live="polite">{label}</div>;
+  return (
+    <div className="pp-state" aria-live="polite">
+      {label}
+    </div>
+  );
 }
 
 export function EmptyState({ title, description }: { title: string; description: string }) {
-  return <section className="pp-state"><strong>{title}</strong><span>{description}</span></section>;
+  return (
+    <section className="pp-state">
+      <strong>{title}</strong>
+      <span>{description}</span>
+    </section>
+  );
 }
 
-export function ErrorState({ title = 'Something went wrong', description }: { title?: string; description: string }) {
-  return <section className="pp-state pp-state--error" role="alert"><strong>{title}</strong><span>{description}</span></section>;
+export function ErrorState({
+  title = 'Something went wrong',
+  description,
+}: {
+  title?: string;
+  description: string;
+}) {
+  return (
+    <section className="pp-state pp-state--error" role="alert">
+      <strong>{title}</strong>
+      <span>{description}</span>
+    </section>
+  );
 }
 
 export function PermissionDenied() {
-  return <section className="pp-state pp-state--error" role="alert"><strong>Permission denied</strong><span>You do not have permission to view this information.</span></section>;
+  return (
+    <section className="pp-state pp-state--error" role="alert">
+      <strong>Permission denied</strong>
+      <span>You do not have permission to view this information.</span>
+    </section>
+  );
 }
