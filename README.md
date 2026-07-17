@@ -58,3 +58,7 @@ Requisitions, RFQs, quotations, awards, purchase orders, receiving, invoices, da
 Phase 2A adds the PostgreSQL-backed Purchase Request Draft → approval → procurement intake → buyer assignment vertical slice. It includes decimal-safe request lines, tenant-safe numbering, immutable approval-route snapshots, sequential decisions, optimistic locking, idempotency keys, assignment history, audit events, and RLS on every new tenant-owned table. The web workspace consumes the authenticated API and deliberately contains no seeded procurement records or invented metrics.
 
 The API surface is available under `/v1/purchase-requests`, `/v1/approvals`, `/v1/procurement-intake`, and `/v1/approval-policies`; OpenAPI is served at `/docs`. RFQ, quotation, award, and purchase-order execution remain future phases.
+
+## Phase 2B sourcing data foundation
+
+The Phase 2B migration adds forced-RLS supplier, qualification, RFQ, invitation, clarification, and quotation storage. Shared domain rules define explicit supplier and RFQ transitions, invitation eligibility, deadline enforcement, granular internal and supplier-portal permissions, and decimal-safe line calculations. See `docs/PHASE_2B_IMPLEMENTATION.md` for confidentiality boundaries and the future-phase boundary.

@@ -19,6 +19,33 @@ export const PLATFORM_PERMISSIONS = [
   'procurement_intake.read',
   'procurement_intake.assign',
   'approval_policies.manage',
+  'suppliers.create',
+  'suppliers.read',
+  'suppliers.update',
+  'suppliers.qualify',
+  'suppliers.activate',
+  'suppliers.suspend',
+  'suppliers.block',
+  'supplier_users.manage',
+  'supplier_compliance.manage',
+  'rfqs.create',
+  'rfqs.read',
+  'rfqs.update_draft',
+  'rfqs.publish',
+  'rfqs.extend_deadline',
+  'rfqs.cancel',
+  'rfqs.close',
+  'rfq_invitations.manage',
+  'rfq_clarifications.manage',
+  'quotations.read',
+  'quotations.read_commercial',
+  'supplier_portal.rfqs.read_invited',
+  'supplier_portal.invitations.respond',
+  'supplier_portal.clarifications.create',
+  'supplier_portal.quotations.create',
+  'supplier_portal.quotations.submit',
+  'supplier_portal.quotations.revise',
+  'supplier_portal.quotations.withdraw',
 ] as const;
 
 export const PURCHASE_REQUEST_STATUSES = [
@@ -87,4 +114,142 @@ export function redactSensitive(value: unknown): unknown {
       return [key, typeof nested === 'object' ? redactSensitive(nested) : nested];
     }),
   );
+}
+
+export const PHASE_2B_PERMISSIONS = [
+  'suppliers.create',
+  'suppliers.read',
+  'suppliers.update',
+  'suppliers.qualify',
+  'suppliers.activate',
+  'suppliers.suspend',
+  'suppliers.block',
+  'supplier_users.manage',
+  'supplier_compliance.manage',
+  'rfqs.create',
+  'rfqs.read',
+  'rfqs.update_draft',
+  'rfqs.publish',
+  'rfqs.extend_deadline',
+  'rfqs.cancel',
+  'rfqs.close',
+  'rfq_invitations.manage',
+  'rfq_clarifications.manage',
+  'quotations.read',
+  'quotations.read_commercial',
+  'supplier_portal.rfqs.read_invited',
+  'supplier_portal.invitations.respond',
+  'supplier_portal.clarifications.create',
+  'supplier_portal.quotations.create',
+  'supplier_portal.quotations.submit',
+  'supplier_portal.quotations.revise',
+  'supplier_portal.quotations.withdraw',
+] as const;
+
+export const SUPPLIER_STATUSES = [
+  'DRAFT',
+  'PENDING_QUALIFICATION',
+  'ACTIVE',
+  'SUSPENDED',
+  'BLOCKED',
+  'INACTIVE',
+  'REJECTED',
+] as const;
+export type SupplierStatus = (typeof SUPPLIER_STATUSES)[number];
+export const QUALIFICATION_STATUSES = [
+  'NOT_STARTED',
+  'PENDING',
+  'UNDER_REVIEW',
+  'APPROVED',
+  'REJECTED',
+  'EXPIRED',
+] as const;
+export type QualificationStatus = (typeof QUALIFICATION_STATUSES)[number];
+export const RFQ_STATUSES = [
+  'DRAFT',
+  'READY_FOR_REVIEW',
+  'PUBLISHED',
+  'CLARIFICATION_OPEN',
+  'QUOTATION_OPEN',
+  'QUOTATION_CLOSED',
+  'CANCELLED',
+  'CLOSED',
+] as const;
+export type RfqStatus = (typeof RFQ_STATUSES)[number];
+export const INVITATION_STATUSES = [
+  'DRAFT',
+  'SENT',
+  'VIEWED',
+  'ACCEPTED',
+  'DECLINED',
+  'EXPIRED',
+  'REVOKED',
+] as const;
+export const QUOTATION_STATUSES = [
+  'DRAFT',
+  'SUBMITTED',
+  'REVISED',
+  'WITHDRAWN',
+  'LATE_REJECTED',
+  'LOCKED',
+] as const;
+export type QuotationStatus = (typeof QUOTATION_STATUSES)[number];
+
+const supplierTransitions: Readonly<Record<SupplierStatus, readonly SupplierStatus[]>> = {
+  DRAFT: ['PENDING_QUALIFICATION'],
+  PENDING_QUALIFICATION: ['ACTIVE', 'REJECTED'],
+  ACTIVE: ['SUSPENDED', 'BLOCKED', 'INACTIVE'],
+  SUSPENDED: ['ACTIVE', 'BLOCKED', 'INACTIVE'],
+  BLOCKED: ['ACTIVE', 'INACTIVE'],
+  INACTIVE: ['ACTIVE'],
+  REJECTED: ['PENDING_QUALIFICATION'],
+};
+const rfqTransitions: Readonly<Record<RfqStatus, readonly RfqStatus[]>> = {
+  DRAFT: ['READY_FOR_REVIEW', 'CANCELLED'],
+  READY_FOR_REVIEW: ['DRAFT', 'PUBLISHED', 'CANCELLED'],
+  PUBLISHED: ['CLARIFICATION_OPEN', 'QUOTATION_OPEN', 'CANCELLED'],
+  CLARIFICATION_OPEN: ['QUOTATION_OPEN', 'QUOTATION_CLOSED', 'CANCELLED'],
+  QUOTATION_OPEN: ['QUOTATION_CLOSED', 'CANCELLED'],
+  QUOTATION_CLOSED: ['CLOSED'],
+  CANCELLED: [],
+  CLOSED: [],
+};
+export function assertSupplierTransition(from: SupplierStatus, to: SupplierStatus): void {
+  if (!supplierTransitions[from].includes(to))
+    throw new Error(`Illegal supplier transition: ${from} -> ${to}`);
+}
+export function assertRfqTransition(from: RfqStatus, to: RfqStatus): void {
+  if (!rfqTransitions[from].includes(to))
+    throw new Error(`Illegal RFQ transition: ${from} -> ${to}`);
+}
+export function assertSupplierEligibleForInvitation(
+  status: SupplierStatus,
+  qualification: QualificationStatus,
+): void {
+  if (status !== 'ACTIVE' || qualification !== 'APPROVED')
+    throw new Error('Supplier must be active and qualified');
+}
+export function assertBeforeDeadline(deadline: Date, now = new Date()): void {
+  if (now.getTime() > deadline.getTime()) throw new Error('Submission deadline has passed');
+}
+/** Decimal-safe multiplication of non-negative decimal strings, returned at four decimal places. */
+export function calculateNetLineAmount(
+  quantity: string,
+  unitPrice: string,
+  discount: string,
+  tax: string,
+): string {
+  const scale = 10_000n;
+  const parse = (value: string) => {
+    if (!/^\d+(\.\d{1,4})?$/.test(value)) throw new Error('Invalid monetary value');
+    const [whole, fraction = ''] = value.split('.');
+    return BigInt(whole!) * scale + BigInt(fraction.padEnd(4, '0'));
+  };
+  const q = parse(quantity),
+    price = parse(unitPrice),
+    d = parse(discount),
+    t = parse(tax);
+  const result = (q * price) / scale - d + t;
+  if (result < 0n) throw new Error('Net line amount cannot be negative');
+  return `${result / scale}.${(result % scale).toString().padStart(4, '0')}`;
 }
