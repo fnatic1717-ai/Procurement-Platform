@@ -357,43 +357,143 @@ runWhenDatabase('PostgreSQL tenant isolation', () => {
 
   it('denies competing supplier invitations and quotations for a restricted supplier context', async () => {
     const seeded = await asTenant(tenantA, async () => {
+      await client.query("SELECT set_config('app.actor_type', 'internal_user', true)");
+      const supplierUsers = await client.query(
+        "INSERT INTO users(email,display_name,actor_type) VALUES('supplier-a@example.com','Supplier User A','supplier_user'),('supplier-b@example.com','Supplier User B','supplier_user') RETURNING id",
+      );
+      await client.query(
+        "INSERT INTO tenant_memberships(tenant_id,user_id,member_type,status) VALUES($1,$2,'supplier','active'),($1,$3,'supplier','active')",
+        [tenantA, supplierUsers.rows[0].id, supplierUsers.rows[1].id],
+      );
       const suppliers = await client.query(
         "INSERT INTO suppliers(tenant_id,supplier_number,legal_name,supplier_type,country,default_currency,status,qualification_status) VALUES($1,'SUP-A','Supplier A','company','US','USD','ACTIVE','APPROVED'),($1,'SUP-B','Supplier B','company','US','USD','ACTIVE','APPROVED') RETURNING id",
         [tenantA],
+      );
+      await client.query(
+        'INSERT INTO supplier_user_memberships(tenant_id,supplier_id,user_id) VALUES($1,$2,$3),($1,$4,$5)',
+        [
+          tenantA,
+          suppliers.rows[0].id,
+          supplierUsers.rows[0].id,
+          suppliers.rows[1].id,
+          supplierUsers.rows[1].id,
+        ],
       );
       const rfq = await client.query(
         "INSERT INTO rfqs(tenant_id,rfq_number,title,procurement_category,buyer_id,currency,submission_deadline,clarification_deadline,required_by,delivery_location,status) VALUES($1,'RFQ-SEC','Confidential sourcing','IT',$2,'USD',now()+interval '2 day',now()+interval '1 day',current_date+7,'HQ','PUBLISHED') RETURNING id",
         [tenantA, userA],
       );
+      const rfqLine = await client.query(
+        "INSERT INTO rfq_lines(tenant_id,rfq_id,description,item_type,quantity,unit_of_measure,specifications,required_by,delivery_location,category,line_sequence) VALUES($1,$2,'Secure endpoint','goods',1,'EA','Managed endpoint',current_date+7,'HQ','IT',1) RETURNING id",
+        [tenantA, rfq.rows[0].id],
+      );
+      const quotationIds: string[] = [];
+      const invitationIds: string[] = [];
+      const lineIds: string[] = [];
       for (const supplier of suppliers.rows) {
-        await client.query(
-          "INSERT INTO rfq_supplier_invitations(tenant_id,rfq_id,supplier_id,status,expires_at) VALUES($1,$2,$3,'ACCEPTED',now()+interval '1 day')",
+        const invitation = await client.query(
+          "INSERT INTO rfq_supplier_invitations(tenant_id,rfq_id,supplier_id,status,expires_at) VALUES($1,$2,$3,'ACCEPTED',now()+interval '1 day') RETURNING id",
           [tenantA, rfq.rows[0].id, supplier.id],
         );
-        await client.query(
-          "INSERT INTO quotations(tenant_id,quotation_number,rfq_id,supplier_id,currency,status) VALUES($1,'Q-'||substr($3::text,1,8),$2,$3,'USD','SUBMITTED')",
+        const quotation = await client.query(
+          "INSERT INTO quotations(tenant_id,quotation_number,rfq_id,supplier_id,currency,status) VALUES($1,'Q-'||substr($3::text,1,8),$2,$3,'USD','SUBMITTED') RETURNING id",
           [tenantA, rfq.rows[0].id, supplier.id],
         );
+        const line = await client.query(
+          "INSERT INTO quotation_lines(tenant_id,quotation_id,rfq_id,rfq_line_id,offered_description,quantity,unit_price,compliance_response) VALUES($1,$2,$3,$4,'Compliant endpoint',1,100,'COMPLIANT') RETURNING id",
+          [tenantA, quotation.rows[0].id, rfq.rows[0].id, rfqLine.rows[0].id],
+        );
+        invitationIds.push(invitation.rows[0].id);
+        quotationIds.push(quotation.rows[0].id);
+        lineIds.push(line.rows[0].id);
       }
-      return { supplierA: suppliers.rows[0].id, supplierB: suppliers.rows[1].id };
+      return {
+        supplierA: suppliers.rows[0].id,
+        supplierB: suppliers.rows[1].id,
+        supplierUserA: supplierUsers.rows[0].id,
+        rfqId: rfq.rows[0].id,
+        rfqLineId: rfqLine.rows[0].id,
+        ownInvitation: invitationIds[0],
+        competingInvitation: invitationIds[1],
+        ownQuotation: quotationIds[0],
+        competingQuotation: quotationIds[1],
+        ownLine: lineIds[0],
+        competingLine: lineIds[1],
+      };
     });
-    const visible = await asTenant(tenantA, async () => {
-      await client.query(
-        "SELECT set_config('app.actor_type','supplier_user',true),set_config('app.current_supplier_id',$1,true)",
-        [seeded.supplierA],
-      );
-      return client.query('SELECT supplier_id FROM quotations');
-    });
-    expect(visible.rows).toEqual([{ supplier_id: seeded.supplierA }]);
-    const competingInvitation = await asTenant(tenantA, async () => {
-      await client.query(
-        "SELECT set_config('app.actor_type','supplier_user',true),set_config('app.current_supplier_id',$1,true)",
-        [seeded.supplierA],
-      );
-      return client.query('SELECT id FROM rfq_supplier_invitations WHERE supplier_id=$1', [
-        seeded.supplierB,
-      ]);
-    });
-    expect(competingInvitation.rowCount).toBe(0);
+
+    async function asPersistedSupplier<T>(work: () => Promise<T>): Promise<T> {
+      return asTenant(tenantA, async () => {
+        await client.query("SELECT set_config('app.actor_type','supplier_user',true)");
+        const membership = await client.query(
+          'SELECT supplier_id FROM supplier_user_memberships WHERE user_id=$1 AND active=true',
+          [seeded.supplierUserA],
+        );
+        expect(membership.rows).toEqual([{ supplier_id: seeded.supplierA }]);
+        await client.query("SELECT set_config('app.current_supplier_id',$1,true)", [
+          membership.rows[0].supplier_id,
+        ]);
+        return work();
+      });
+    }
+
+    const own = await asPersistedSupplier(async () => ({
+      invitations: await client.query('SELECT id FROM rfq_supplier_invitations'),
+      quotations: await client.query('SELECT id FROM quotations'),
+      lines: await client.query('SELECT id FROM quotation_lines'),
+    }));
+    expect(own.invitations.rows).toEqual([{ id: seeded.ownInvitation }]);
+    expect(own.quotations.rows).toEqual([{ id: seeded.ownQuotation }]);
+    expect(own.lines.rows).toEqual([{ id: seeded.ownLine }]);
+
+    await expect(
+      asPersistedSupplier(() =>
+        client.query(
+          "INSERT INTO rfq_supplier_invitations(tenant_id,rfq_id,supplier_id,status,expires_at) VALUES($1,$2,$3,'SENT',now()+interval '1 day')",
+          [tenantA, seeded.rfqId, seeded.supplierA],
+        ),
+      ),
+    ).rejects.toMatchObject({ code: '42501' });
+    expect(
+      await asPersistedSupplier(() =>
+        client.query('UPDATE quotations SET currency=$1 WHERE id=$2', [
+          'EUR',
+          seeded.competingQuotation,
+        ]),
+      ),
+    ).toMatchObject({ rowCount: 0 });
+    expect(
+      await asPersistedSupplier(() =>
+        client.query('DELETE FROM quotations WHERE id=$1', [seeded.competingQuotation]),
+      ),
+    ).toMatchObject({ rowCount: 0 });
+    expect(
+      await asPersistedSupplier(() =>
+        client.query('UPDATE rfq_supplier_invitations SET status=$1 WHERE id=$2', [
+          'DECLINED',
+          seeded.competingInvitation,
+        ]),
+      ),
+    ).toMatchObject({ rowCount: 0 });
+    expect(
+      await asPersistedSupplier(() =>
+        client.query('DELETE FROM rfq_supplier_invitations WHERE id=$1', [
+          seeded.competingInvitation,
+        ]),
+      ),
+    ).toMatchObject({ rowCount: 0 });
+    expect(
+      await asPersistedSupplier(() =>
+        client.query('UPDATE quotation_lines SET unit_price=1 WHERE id=$1', [seeded.competingLine]),
+      ),
+    ).toMatchObject({ rowCount: 0 });
+    await expect(
+      asPersistedSupplier(() =>
+        client.query(
+          "INSERT INTO quotation_lines(tenant_id,quotation_id,rfq_id,rfq_line_id,offered_description,quantity,unit_price,compliance_response) VALUES($1,$2,$3,$4,'Attack',1,1,'COMPLIANT')",
+          [tenantA, seeded.competingQuotation, seeded.rfqId, seeded.rfqLineId],
+        ),
+      ),
+    ).rejects.toMatchObject({ code: '42501' });
   });
 });
