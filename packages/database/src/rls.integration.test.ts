@@ -354,4 +354,46 @@ runWhenDatabase('PostgreSQL tenant isolation', () => {
       true,
     );
   });
+
+  it('denies competing supplier invitations and quotations for a restricted supplier context', async () => {
+    const seeded = await asTenant(tenantA, async () => {
+      const suppliers = await client.query(
+        "INSERT INTO suppliers(tenant_id,supplier_number,legal_name,supplier_type,country,default_currency,status,qualification_status) VALUES($1,'SUP-A','Supplier A','company','US','USD','ACTIVE','APPROVED'),($1,'SUP-B','Supplier B','company','US','USD','ACTIVE','APPROVED') RETURNING id",
+        [tenantA],
+      );
+      const rfq = await client.query(
+        "INSERT INTO rfqs(tenant_id,rfq_number,title,procurement_category,buyer_id,currency,submission_deadline,clarification_deadline,required_by,delivery_location,status) VALUES($1,'RFQ-SEC','Confidential sourcing','IT',$2,'USD',now()+interval '2 day',now()+interval '1 day',current_date+7,'HQ','PUBLISHED') RETURNING id",
+        [tenantA, userA],
+      );
+      for (const supplier of suppliers.rows) {
+        await client.query(
+          "INSERT INTO rfq_supplier_invitations(tenant_id,rfq_id,supplier_id,status,expires_at) VALUES($1,$2,$3,'ACCEPTED',now()+interval '1 day')",
+          [tenantA, rfq.rows[0].id, supplier.id],
+        );
+        await client.query(
+          "INSERT INTO quotations(tenant_id,quotation_number,rfq_id,supplier_id,currency,status) VALUES($1,'Q-'||substr($3::text,1,8),$2,$3,'USD','SUBMITTED')",
+          [tenantA, rfq.rows[0].id, supplier.id],
+        );
+      }
+      return { supplierA: suppliers.rows[0].id, supplierB: suppliers.rows[1].id };
+    });
+    const visible = await asTenant(tenantA, async () => {
+      await client.query(
+        "SELECT set_config('app.actor_type','supplier_user',true),set_config('app.current_supplier_id',$1,true)",
+        [seeded.supplierA],
+      );
+      return client.query('SELECT supplier_id FROM quotations');
+    });
+    expect(visible.rows).toEqual([{ supplier_id: seeded.supplierA }]);
+    const competingInvitation = await asTenant(tenantA, async () => {
+      await client.query(
+        "SELECT set_config('app.actor_type','supplier_user',true),set_config('app.current_supplier_id',$1,true)",
+        [seeded.supplierA],
+      );
+      return client.query('SELECT id FROM rfq_supplier_invitations WHERE supplier_id=$1', [
+        seeded.supplierB,
+      ]);
+    });
+    expect(competingInvitation.rowCount).toBe(0);
+  });
 });

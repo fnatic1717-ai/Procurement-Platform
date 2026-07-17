@@ -21,3 +21,13 @@ describe('Phase 2B domain invariants', () => {
   it('calculates money without floating point', () =>
     expect(calculateNetLineAmount('3.0000', '10.1250', '0.3750', '1.2500')).toBe('31.2500'));
 });
+
+describe('sourcing idempotency payload canonicalization', () => {
+  it('is independent of object key order and changes with payload', async () => {
+    const { sourcingPayloadHash } = await import('./index.js');
+    expect(sourcingPayloadHash({ version: 1, reason: 'a' })).toBe(
+      sourcingPayloadHash({ reason: 'a', version: 1 }),
+    );
+    expect(sourcingPayloadHash({ version: 1 })).not.toBe(sourcingPayloadHash({ version: 2 }));
+  });
+});

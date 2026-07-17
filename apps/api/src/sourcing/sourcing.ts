@@ -3,12 +3,14 @@ import {
   Body,
   ConflictException,
   Controller,
+  Delete,
   ForbiddenException,
   Get,
   Injectable,
   NotFoundException,
   Param,
   ParseUUIDPipe,
+  ParseIntPipe,
   Patch,
   Post,
   Query,
@@ -30,6 +32,7 @@ import {
   MaxLength,
   Min,
 } from 'class-validator';
+import { createHash } from 'node:crypto';
 import { prisma, type TransactionClient } from '@procurement/database';
 import type { AuthenticatedPrincipal } from '@procurement/shared';
 import type { Request } from 'express';
@@ -80,6 +83,40 @@ class MembershipDto {
   @IsUUID() userId!: string;
   @IsBoolean() active = true;
 }
+class ReviewQualificationDto extends CommandDto {
+  @IsUUID() recordId!: string;
+  @IsIn(['APPROVED', 'REJECTED', 'EXPIRED']) status!: 'APPROVED' | 'REJECTED' | 'EXPIRED';
+  @IsString() @IsNotEmpty() @MaxLength(2000) decisionComment!: string;
+  @IsOptional() @IsString() @MaxLength(4000) internalRiskNotes?: string;
+  @IsOptional() @IsDateString() expiryDate?: string;
+}
+class VerifyComplianceDto extends CommandDto {
+  @IsIn(['VERIFIED', 'REJECTED']) status!: 'VERIFIED' | 'REJECTED';
+  @IsOptional() @IsString() @MaxLength(1000) reason?: string;
+}
+class CategoryDto {
+  @IsString() @IsNotEmpty() @MaxLength(50) code!: string;
+  @IsString() @IsNotEmpty() @MaxLength(200) name!: string;
+}
+class RfqLineDto {
+  @IsString() @IsNotEmpty() @MaxLength(1000) description!: string;
+  @IsIn(['goods', 'services']) itemType!: 'goods' | 'services';
+  @Matches(/^\d{1,14}(\.\d{1,6})?$/) quantity!: string;
+  @IsString() @MaxLength(50) unitOfMeasure!: string;
+  @IsString() @MaxLength(10000) specifications!: string;
+  @IsDateString() requiredBy!: string;
+  @IsString() @MaxLength(500) deliveryLocation!: string;
+  @IsString() @MaxLength(150) category!: string;
+  @IsInt() @Min(1) lineSequence!: number;
+}
+class UpdateRfqLineDto extends RfqLineDto {
+  @IsInt() @Min(1) version!: number;
+}
+class DeadlineDto extends CommandDto {
+  @IsDateString() clarificationDeadline!: string;
+  @IsDateString() submissionDeadline!: string;
+  @IsString() @IsNotEmpty() @MaxLength(1000) reason!: string;
+}
 class ComplianceDto {
   @IsString() @MaxLength(100) documentType!: string;
   @IsUUID() fileObjectId!: string;
@@ -96,6 +133,9 @@ class RfqDto {
 }
 class FromRequestDto extends RfqDto {
   @IsUUID() purchaseRequestId!: string;
+}
+class UpdateRfqDto extends RfqDto {
+  @IsInt() @Min(1) version!: number;
 }
 class InvitationDto {
   @IsUUID() supplierId!: string;
@@ -115,6 +155,9 @@ class QuoteDto {
   @IsDateString() validityDate!: string;
   @IsOptional() @IsString() @MaxLength(1000) paymentTerms?: string;
 }
+class UpdateQuoteDto extends QuoteDto {
+  @IsInt() @Min(1) version!: number;
+}
 class QuoteLineDto {
   @IsUUID() rfqLineId!: string;
   @IsString() @MaxLength(1000) offeredDescription!: string;
@@ -123,6 +166,9 @@ class QuoteLineDto {
   @Matches(/^\d{1,16}(\.\d{1,4})?$/) discount = '0';
   @Matches(/^\d{1,16}(\.\d{1,4})?$/) tax = '0';
   @IsString() @MaxLength(2000) complianceResponse!: string;
+}
+class UpdateQuoteLineDto extends QuoteLineDto {
+  @IsInt() @Min(1) version!: number;
 }
 function actor(r: Request) {
   if (!r.principal) throw new BadRequestException('Principal missing');
@@ -140,9 +186,40 @@ export class SourcingService {
   constructor(private readonly audit: AuditService) {}
   private tx<T>(p: AuthenticatedPrincipal, fn: (tx: TransactionClient) => Promise<T>) {
     return prisma.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT set_config('app.current_tenant_id',${p.tenantId},true)`;
+      await tx.$executeRaw`SELECT set_config('app.current_tenant_id',${p.tenantId},true),set_config('app.actor_type',${p.actorType},true)`;
       return fn(tx);
     });
+  }
+
+  private async idempotent<T>(
+    tx: TransactionClient,
+    p: AuthenticatedPrincipal,
+    operation: string,
+    objectId: string,
+    key: string,
+    payload: unknown,
+    action: () => Promise<T>,
+  ): Promise<T> {
+    const hash = createHash('sha256')
+      .update(JSON.stringify(payload, Object.keys(payload as object).sort()))
+      .digest('hex');
+    const inserted =
+      await tx.$executeRaw`INSERT INTO sourcing_idempotency(tenant_id,actor_id,operation,object_id,idempotency_key,payload_hash) VALUES(${p.tenantId}::uuid,${p.userId}::uuid,${operation},${objectId}::uuid,${key},${hash}) ON CONFLICT DO NOTHING`;
+    if (!inserted) {
+      const existing = one(
+        await tx.$queryRaw<
+          { payload_hash: string; response: unknown; completed: boolean }[]
+        >`SELECT payload_hash,response,completed FROM sourcing_idempotency WHERE actor_id=${p.userId}::uuid AND operation=${operation} AND object_id=${objectId}::uuid AND idempotency_key=${key} FOR UPDATE`,
+      );
+      if (existing.payload_hash !== hash)
+        throw new ConflictException('Idempotency key was already used with a different payload');
+      if (!existing.completed)
+        throw new ConflictException('Identical operation is still processing');
+      return existing.response as T;
+    }
+    const result = await action();
+    await tx.$executeRaw`UPDATE sourcing_idempotency SET response=${JSON.stringify(result)}::jsonb,completed=true WHERE actor_id=${p.userId}::uuid AND operation=${operation} AND object_id=${objectId}::uuid AND idempotency_key=${key}`;
+    return result;
   }
   private async supplier(tx: TransactionClient, p: AuthenticatedPrincipal) {
     if (p.actorType !== 'supplier_user') throw new ForbiddenException();
@@ -151,6 +228,7 @@ export class SourcingService {
     >`SELECT supplier_id FROM supplier_user_memberships WHERE user_id=${p.userId}::uuid AND active`;
     if (rows.length !== 1)
       throw new ForbiddenException('Active persisted supplier membership required');
+    await tx.$executeRaw`SELECT set_config('app.current_supplier_id',${rows[0]!.supplier_id},true)`;
     return rows[0]!.supplier_id;
   }
   private auditOne(
@@ -176,11 +254,16 @@ export class SourcingService {
     );
   }
   async suppliers(p: AuthenticatedPrincipal, q: PageDto) {
-    return this.tx(
-      p,
-      (tx) =>
-        tx.$queryRaw`SELECT id,supplier_number,legal_name,trading_name,status,qualification_status,country,default_currency,version FROM suppliers WHERE (${q.search ?? null}::text IS NULL OR legal_name ILIKE '%'||${q.search ?? ''}||'%') ORDER BY created_at DESC LIMIT ${q.limit} OFFSET ${(q.page - 1) * q.limit}`,
-    );
+    return this.tx(p, async (tx) => {
+      const items =
+        await tx.$queryRaw`SELECT id,supplier_number,legal_name,trading_name,status,qualification_status,country,default_currency,version FROM suppliers WHERE (${q.search ?? null}::text IS NULL OR legal_name ILIKE '%'||${q.search ?? ''}||'%') ORDER BY created_at DESC LIMIT ${q.limit} OFFSET ${(q.page - 1) * q.limit}`;
+      const total = one(
+        await tx.$queryRaw<
+          { count: number }[]
+        >`SELECT count(*)::int count FROM suppliers WHERE (${q.search ?? null}::text IS NULL OR legal_name ILIKE '%'||${q.search ?? ''}||'%')`,
+      ).count;
+      return { items, total, page: q.page, limit: q.limit };
+    });
   }
   async supplierDetail(p: AuthenticatedPrincipal, id: string) {
     return this.tx(p, async (tx) =>
@@ -288,6 +371,8 @@ export class SourcingService {
         >`UPDATE suppliers SET status=${status}::supplier_status,qualification_status=CASE WHEN ${status}='PENDING_QUALIFICATION' THEN 'PENDING'::qualification_status ELSE qualification_status END,suspension_reason=CASE WHEN ${status}='SUSPENDED' THEN ${d.reason} ELSE suspension_reason END,block_reason=CASE WHEN ${status}='BLOCKED' THEN ${d.reason} ELSE block_reason END,version=version+1 WHERE id=${id}::uuid AND version=${d.version} RETURNING *`,
         true,
       );
+      if (status === 'PENDING_QUALIFICATION')
+        await tx.$executeRaw`INSERT INTO supplier_qualification_records(tenant_id,supplier_id,qualification_type,status,submitted_at) VALUES(${p.tenantId}::uuid,${id}::uuid,'STANDARD','PENDING',now())`;
       await this.auditOne(tx, p, `supplier.${status.toLowerCase()}`, 'supplier', id, s);
       return s;
     });
@@ -317,11 +402,16 @@ export class SourcingService {
     });
   }
   async rfqs(p: AuthenticatedPrincipal, q: PageDto) {
-    return this.tx(
-      p,
-      (tx) =>
-        tx.$queryRaw`SELECT id,rfq_number,title,status,currency,submission_deadline,version FROM rfqs WHERE (${q.search ?? null}::text IS NULL OR title ILIKE '%'||${q.search ?? ''}||'%') ORDER BY created_at DESC LIMIT ${q.limit} OFFSET ${(q.page - 1) * q.limit}`,
-    );
+    return this.tx(p, async (tx) => {
+      const items =
+        await tx.$queryRaw`SELECT id,rfq_number,title,status,currency,submission_deadline,version FROM rfqs WHERE (${q.search ?? null}::text IS NULL OR title ILIKE '%'||${q.search ?? ''}||'%') ORDER BY created_at DESC LIMIT ${q.limit} OFFSET ${(q.page - 1) * q.limit}`;
+      const total = one(
+        await tx.$queryRaw<
+          { count: number }[]
+        >`SELECT count(*)::int count FROM rfqs WHERE (${q.search ?? null}::text IS NULL OR title ILIKE '%'||${q.search ?? ''}||'%')`,
+      ).count;
+      return { items, total, page: q.page, limit: q.limit };
+    });
   }
   async invite(p: AuthenticatedPrincipal, id: string, d: InvitationDto) {
     return this.tx(p, async (tx) => {
@@ -335,17 +425,19 @@ export class SourcingService {
     });
   }
   async publish(p: AuthenticatedPrincipal, id: string, d: CommandDto) {
-    return this.tx(p, async (tx) => {
-      const r = one(
-        await tx.$queryRaw<
-          Record<string, unknown>[]
-        >`UPDATE rfqs SET status='PUBLISHED',published_at=now(),issue_date=current_date,version=version+1 WHERE id=${id}::uuid AND version=${d.version} AND status IN ('DRAFT','READY_FOR_REVIEW') AND submission_deadline>now() AND EXISTS(SELECT 1 FROM rfq_lines WHERE rfq_id=${id}::uuid) AND EXISTS(SELECT 1 FROM rfq_supplier_invitations WHERE rfq_id=${id}::uuid) RETURNING *`,
-        true,
-      );
-      await tx.$executeRaw`UPDATE rfq_supplier_invitations SET status='SENT',sent_at=now(),version=version+1 WHERE rfq_id=${id}::uuid AND status='DRAFT'`;
-      await this.auditOne(tx, p, 'rfq.published', 'rfq', id, r);
-      return r;
-    });
+    return this.tx(p, async (tx) =>
+      this.idempotent(tx, p, 'rfq.publish', id, d.idempotencyKey, d, async () => {
+        const r = one(
+          await tx.$queryRaw<
+            Record<string, unknown>[]
+          >`UPDATE rfqs SET status='PUBLISHED',published_at=now(),issue_date=current_date,version=version+1 WHERE id=${id}::uuid AND version=${d.version} AND status IN ('DRAFT','READY_FOR_REVIEW') AND submission_deadline>now() AND EXISTS(SELECT 1 FROM rfq_lines WHERE rfq_id=${id}::uuid) AND EXISTS(SELECT 1 FROM rfq_supplier_invitations WHERE rfq_id=${id}::uuid) RETURNING *`,
+          true,
+        );
+        await tx.$executeRaw`UPDATE rfq_supplier_invitations SET status='SENT',sent_at=now(),version=version+1 WHERE rfq_id=${id}::uuid AND status='DRAFT'`;
+        await this.auditOne(tx, p, 'rfq.published', 'rfq', id, r);
+        return r;
+      }),
+    );
   }
   async inbox(p: AuthenticatedPrincipal) {
     return this.tx(p, async (tx) => {
@@ -356,11 +448,20 @@ export class SourcingService {
   async invitation(p: AuthenticatedPrincipal, id: string, d: CommandDto, accept: boolean) {
     return this.tx(p, async (tx) => {
       const sid = await this.supplier(tx, p);
-      return one(
-        await tx.$queryRaw<
-          unknown[]
-        >`UPDATE rfq_supplier_invitations i SET status=${accept ? 'ACCEPTED' : 'DECLINED'}::invitation_status,accepted_at=CASE WHEN ${accept} THEN now() END,declined_at=CASE WHEN ${!accept} THEN now() END,version=version+1 FROM suppliers s WHERE i.id=${id}::uuid AND i.supplier_id=${sid}::uuid AND s.id=i.supplier_id AND s.status='ACTIVE' AND i.version=${d.version} AND i.status IN ('SENT','VIEWED') AND i.expires_at>now() RETURNING i.*`,
-        true,
+      return this.idempotent(
+        tx,
+        p,
+        accept ? 'invitation.accept' : 'invitation.decline',
+        id,
+        d.idempotencyKey,
+        { ...d, accept },
+        async () =>
+          one(
+            await tx.$queryRaw<
+              unknown[]
+            >`UPDATE rfq_supplier_invitations i SET status=${accept ? 'ACCEPTED' : 'DECLINED'}::invitation_status,accepted_at=CASE WHEN ${accept} THEN now() END,declined_at=CASE WHEN ${!accept} THEN now() END,version=version+1 FROM suppliers s WHERE i.id=${id}::uuid AND i.supplier_id=${sid}::uuid AND s.id=i.supplier_id AND s.status='ACTIVE' AND i.version=${d.version} AND i.status IN ('SENT','VIEWED') AND i.expires_at>now() RETURNING i.*`,
+            true,
+          ),
       );
     });
   }
@@ -413,7 +514,7 @@ export class SourcingService {
       return one(
         await tx.$queryRaw<
           unknown[]
-        >`INSERT INTO quotation_lines(tenant_id,quotation_id,rfq_line_id,offered_description,quantity,unit_price,discount,tax,compliance_response) SELECT ${p.tenantId}::uuid,q.id,${d.rfqLineId}::uuid,${d.offeredDescription},${d.quantity}::numeric,${d.unitPrice}::numeric,${d.discount}::numeric,${d.tax}::numeric,${d.complianceResponse} FROM quotations q JOIN rfqs r ON r.id=q.rfq_id WHERE q.id=${id}::uuid AND q.supplier_id=${sid}::uuid AND q.status='DRAFT' AND r.submission_deadline>now() RETURNING *`,
+        >`INSERT INTO quotation_lines(tenant_id,quotation_id,rfq_id,rfq_line_id,offered_description,quantity,unit_price,discount,tax,compliance_response) SELECT ${p.tenantId}::uuid,q.id,q.rfq_id,${d.rfqLineId}::uuid,${d.offeredDescription},${d.quantity}::numeric,${d.unitPrice}::numeric,${d.discount}::numeric,${d.tax}::numeric,${d.complianceResponse} FROM quotations q JOIN rfqs r ON r.id=q.rfq_id WHERE q.id=${id}::uuid AND q.supplier_id=${sid}::uuid AND q.status='DRAFT' AND r.submission_deadline>now() RETURNING *`,
       );
     });
   }
@@ -425,28 +526,470 @@ export class SourcingService {
   ) {
     return this.tx(p, async (tx) => {
       const sid = await this.supplier(tx, p);
-      if (action === 'WITHDRAWN') {
-        const q = one(
+      return this.idempotent(
+        tx,
+        p,
+        `quotation.${action.toLowerCase()}`,
+        id,
+        d.idempotencyKey,
+        { ...d, action },
+        async () => {
+          if (action === 'WITHDRAWN') {
+            const q = one(
+              await tx.$queryRaw<
+                Record<string, unknown>[]
+              >`UPDATE quotations SET status='WITHDRAWN',withdrawn_at=now(),withdrawal_reason=${(d as ReasonDto).reason},version=version+1 WHERE id=${id}::uuid AND supplier_id=${sid}::uuid AND version=${d.version} AND status IN ('SUBMITTED','REVISED') RETURNING *`,
+              true,
+            );
+            await this.auditOne(tx, p, 'quotation.withdrawn', 'quotation', id, { supplierId: sid });
+            return q;
+          }
+          const q = one(
+            await tx.$queryRaw<
+              Record<string, unknown>[]
+            >`UPDATE quotations q SET status=(CASE WHEN q.current_revision>0 THEN 'REVISED' ELSE ${action} END)::quotation_status,submitted_at=now(),current_revision=current_revision+1,total_amount=x.total,tax_amount=x.tax,version=version+1 FROM (SELECT quotation_id,sum(net_line_amount) total,sum(tax) tax,count(*) n FROM quotation_lines GROUP BY quotation_id)x,rfqs r,suppliers s WHERE q.id=${id}::uuid AND q.id=x.quotation_id AND q.rfq_id=r.id AND q.supplier_id=s.id AND q.supplier_id=${sid}::uuid AND q.version=${d.version} AND q.status='DRAFT'::quotation_status AND s.status='ACTIVE' AND r.submission_deadline>now() AND x.n=(SELECT count(*) FROM rfq_lines WHERE rfq_id=r.id) RETURNING q.*`,
+            true,
+          );
+          await tx.$executeRaw`INSERT INTO quotation_revisions(tenant_id,quotation_id,revision_number,snapshot,submitted_by) SELECT ${p.tenantId}::uuid,id,current_revision,jsonb_build_object('header',to_jsonb(q),'lines',(SELECT jsonb_agg(to_jsonb(l)) FROM quotation_lines l WHERE l.quotation_id=q.id)),${p.userId}::uuid FROM quotations q WHERE id=${id}::uuid`;
+          await this.auditOne(tx, p, `quotation.${action.toLowerCase()}`, 'quotation', id, {
+            supplierId: sid,
+            revision: q.current_revision,
+          });
+          return q;
+        },
+      );
+    });
+  }
+  async qualifications(p: AuthenticatedPrincipal, supplierId: string) {
+    return this.tx(
+      p,
+      (tx) =>
+        tx.$queryRaw`SELECT id,qualification_type,status,reviewer_id,submitted_at,reviewed_at,expiry_date,decision_comment,version FROM supplier_qualification_records WHERE supplier_id=${supplierId}::uuid ORDER BY created_at DESC`,
+    );
+  }
+  async reviewQualification(
+    p: AuthenticatedPrincipal,
+    supplierId: string,
+    d: ReviewQualificationDto,
+  ) {
+    return this.tx(p, (tx) =>
+      this.idempotent(
+        tx,
+        p,
+        'supplier.qualification.review',
+        d.recordId,
+        d.idempotencyKey,
+        d,
+        async () => {
+          const prior = one(
+            await tx.$queryRaw<
+              Record<string, unknown>[]
+            >`SELECT * FROM supplier_qualification_records WHERE id=${d.recordId}::uuid AND supplier_id=${supplierId}::uuid FOR UPDATE`,
+          );
+          const record = one(
+            await tx.$queryRaw<
+              Record<string, unknown>[]
+            >`UPDATE supplier_qualification_records SET status=${d.status}::qualification_status,reviewer_id=${p.userId}::uuid,reviewed_at=now(),expiry_date=${d.expiryDate ?? null}::date,decision_comment=${d.decisionComment},internal_risk_notes=${d.internalRiskNotes ?? null},version=version+1 WHERE id=${d.recordId}::uuid AND version=${d.version} AND status IN ('PENDING','UNDER_REVIEW') RETURNING *`,
+            true,
+          );
+          await tx.$executeRaw`UPDATE suppliers SET qualification_status=${d.status}::qualification_status,status=CASE WHEN ${d.status}='REJECTED' THEN 'REJECTED'::supplier_status ELSE status END,version=version+1 WHERE id=${supplierId}::uuid`;
+          await this.audit.append(
+            {
+              tenantId: p.tenantId,
+              actorId: p.userId,
+              actorType: p.actorType,
+              correlationId: p.correlationId,
+              action: 'supplier.qualification_reviewed',
+              objectType: 'supplier_qualification',
+              objectId: d.recordId,
+              priorState: prior,
+              resultingState: record,
+              metadata: { supplierId },
+            },
+            tx,
+          );
+          return record;
+        },
+      ),
+    );
+  }
+  async verifyCompliance(
+    p: AuthenticatedPrincipal,
+    supplierId: string,
+    id: string,
+    d: VerifyComplianceDto,
+  ) {
+    return this.tx(p, (tx) =>
+      this.idempotent(tx, p, 'supplier.compliance.verify', id, d.idempotencyKey, d, async () => {
+        const prior = one(
           await tx.$queryRaw<
             Record<string, unknown>[]
-          >`UPDATE quotations SET status='WITHDRAWN',withdrawn_at=now(),withdrawal_reason=${(d as ReasonDto).reason},version=version+1 WHERE id=${id}::uuid AND supplier_id=${sid}::uuid AND version=${d.version} AND status IN ('SUBMITTED','REVISED') RETURNING *`,
+          >`SELECT * FROM supplier_compliance_documents WHERE id=${id}::uuid AND supplier_id=${supplierId}::uuid FOR UPDATE`,
+        );
+        const result = one(
+          await tx.$queryRaw<
+            Record<string, unknown>[]
+          >`UPDATE supplier_compliance_documents SET verification_status=${d.status},verified_by=${p.userId}::uuid,verified_at=now(),version=version+1 WHERE id=${id}::uuid AND version=${d.version} RETURNING *`,
           true,
         );
-        await this.auditOne(tx, p, 'quotation.withdrawn', 'quotation', id, { supplierId: sid });
-        return q;
-      }
-      const q = one(
+        await this.audit.append(
+          {
+            tenantId: p.tenantId,
+            actorId: p.userId,
+            actorType: p.actorType,
+            correlationId: p.correlationId,
+            action: 'supplier.compliance_reviewed',
+            objectType: 'supplier_compliance',
+            objectId: id,
+            priorState: prior,
+            resultingState: result,
+            metadata: { supplierId, reason: d.reason },
+          },
+          tx,
+        );
+        return result;
+      }),
+    );
+  }
+  async category(p: AuthenticatedPrincipal, d: CategoryDto) {
+    return this.tx(
+      p,
+      (tx) =>
+        tx.$queryRaw`INSERT INTO supplier_categories(tenant_id,code,name) VALUES(${p.tenantId}::uuid,${d.code},${d.name}) RETURNING *`,
+    );
+  }
+  async assignCategory(p: AuthenticatedPrincipal, supplierId: string, categoryId: string) {
+    return this.tx(p, async (tx) => {
+      const result = one(
         await tx.$queryRaw<
           Record<string, unknown>[]
-        >`UPDATE quotations q SET status=${action}::quotation_status,submitted_at=now(),current_revision=current_revision+1,total_amount=x.total,tax_amount=x.tax,version=version+1 FROM (SELECT quotation_id,sum(net_line_amount) total,sum(tax) tax,count(*) n FROM quotation_lines GROUP BY quotation_id)x,rfqs r,suppliers s WHERE q.id=${id}::uuid AND q.id=x.quotation_id AND q.rfq_id=r.id AND q.supplier_id=s.id AND q.supplier_id=${sid}::uuid AND q.version=${d.version} AND q.status=${action === 'REVISED' ? 'SUBMITTED' : 'DRAFT'}::quotation_status AND s.status='ACTIVE' AND r.submission_deadline>now() AND x.n=(SELECT count(*) FROM rfq_lines WHERE rfq_id=r.id) RETURNING q.*`,
+        >`INSERT INTO supplier_category_assignments(tenant_id,supplier_id,category_id,assigned_by) VALUES(${p.tenantId}::uuid,${supplierId}::uuid,${categoryId}::uuid,${p.userId}::uuid) RETURNING *`,
+      );
+      await this.auditOne(tx, p, 'supplier.category_assigned', 'supplier', supplierId, {
+        categoryId,
+      });
+      return result;
+    });
+  }
+  async removeCategory(p: AuthenticatedPrincipal, supplierId: string, categoryId: string) {
+    return this.tx(p, async (tx) => {
+      const result =
+        await tx.$executeRaw`DELETE FROM supplier_category_assignments WHERE supplier_id=${supplierId}::uuid AND category_id=${categoryId}::uuid`;
+      if (!result) throw new NotFoundException();
+      await this.auditOne(tx, p, 'supplier.category_removed', 'supplier', supplierId, {
+        categoryId,
+      });
+      return { deleted: true };
+    });
+  }
+  async rfqDetail(p: AuthenticatedPrincipal, id: string) {
+    return this.tx(p, async (tx) =>
+      one(
+        await tx.$queryRaw<
+          unknown[]
+        >`SELECT r.*,COALESCE((SELECT jsonb_agg(to_jsonb(l) ORDER BY line_sequence) FROM rfq_lines l WHERE l.rfq_id=r.id),'[]') lines,COALESCE((SELECT jsonb_agg(to_jsonb(i)) FROM rfq_supplier_invitations i WHERE i.rfq_id=r.id),'[]') invitations FROM rfqs r WHERE id=${id}::uuid`,
+      ),
+    );
+  }
+  async updateRfq(p: AuthenticatedPrincipal, id: string, d: UpdateRfqDto) {
+    return this.tx(p, async (tx) => {
+      const prior = one(
+        await tx.$queryRaw<
+          Record<string, unknown>[]
+        >`SELECT * FROM rfqs WHERE id=${id}::uuid FOR UPDATE`,
+      );
+      const result = one(
+        await tx.$queryRaw<
+          Record<string, unknown>[]
+        >`UPDATE rfqs SET title=${d.title},procurement_category=${d.procurementCategory},currency=${d.currency},clarification_deadline=${d.clarificationDeadline}::timestamptz,submission_deadline=${d.submissionDeadline}::timestamptz,required_by=${d.requiredBy}::date,delivery_location=${d.deliveryLocation},version=version+1 WHERE id=${id}::uuid AND version=${d.version} AND status IN ('DRAFT','READY_FOR_REVIEW') RETURNING *`,
         true,
       );
-      await tx.$executeRaw`INSERT INTO quotation_revisions(tenant_id,quotation_id,revision_number,snapshot,submitted_by) SELECT ${p.tenantId}::uuid,id,current_revision,jsonb_build_object('header',to_jsonb(q),'lines',(SELECT jsonb_agg(to_jsonb(l)) FROM quotation_lines l WHERE l.quotation_id=q.id)),${p.userId}::uuid FROM quotations q WHERE id=${id}::uuid`;
-      await this.auditOne(tx, p, `quotation.${action.toLowerCase()}`, 'quotation', id, {
+      await this.audit.append(
+        {
+          tenantId: p.tenantId,
+          actorId: p.userId,
+          actorType: p.actorType,
+          correlationId: p.correlationId,
+          action: 'rfq.updated',
+          objectType: 'rfq',
+          objectId: id,
+          priorState: prior,
+          resultingState: result,
+        },
+        tx,
+      );
+      return result;
+    });
+  }
+  async addRfqLine(p: AuthenticatedPrincipal, rfqId: string, d: RfqLineDto) {
+    return this.tx(p, async (tx) => {
+      const line = one(
+        await tx.$queryRaw<
+          Record<string, unknown>[]
+        >`INSERT INTO rfq_lines(tenant_id,rfq_id,description,item_type,quantity,unit_of_measure,specifications,required_by,delivery_location,category,line_sequence) SELECT ${p.tenantId}::uuid,id,${d.description},${d.itemType}::purchase_item_type,${d.quantity}::numeric,${d.unitOfMeasure},${d.specifications},${d.requiredBy}::date,${d.deliveryLocation},${d.category},${d.lineSequence} FROM rfqs WHERE id=${rfqId}::uuid AND status='DRAFT' RETURNING *`,
+      );
+      await this.auditOne(tx, p, 'rfq.line_added', 'rfq_line', String(line.id), line);
+      return line;
+    });
+  }
+  async updateRfqLine(p: AuthenticatedPrincipal, rfqId: string, id: string, d: UpdateRfqLineDto) {
+    return this.tx(p, async (tx) => {
+      const line = one(
+        await tx.$queryRaw<
+          Record<string, unknown>[]
+        >`UPDATE rfq_lines l SET description=${d.description},item_type=${d.itemType}::purchase_item_type,quantity=${d.quantity}::numeric,unit_of_measure=${d.unitOfMeasure},specifications=${d.specifications},required_by=${d.requiredBy}::date,delivery_location=${d.deliveryLocation},category=${d.category},line_sequence=${d.lineSequence},version=version+1 FROM rfqs r WHERE l.id=${id}::uuid AND l.rfq_id=${rfqId}::uuid AND l.version=${d.version} AND r.id=l.rfq_id AND r.status='DRAFT' RETURNING l.*`,
+        true,
+      );
+      await this.auditOne(tx, p, 'rfq.line_updated', 'rfq_line', id, line);
+      return line;
+    });
+  }
+  async removeRfqLine(p: AuthenticatedPrincipal, rfqId: string, id: string, version: number) {
+    return this.tx(p, async (tx) => {
+      const rows = await tx.$queryRaw<
+        Record<string, unknown>[]
+      >`DELETE FROM rfq_lines l USING rfqs r WHERE l.id=${id}::uuid AND l.rfq_id=${rfqId}::uuid AND l.version=${version} AND r.id=l.rfq_id AND r.status='DRAFT' RETURNING l.*`;
+      const line = one(rows, true);
+      await this.auditOne(tx, p, 'rfq.line_removed', 'rfq_line', id, line);
+      return { deleted: true };
+    });
+  }
+  async revokeInvitation(p: AuthenticatedPrincipal, rfqId: string, id: string, d: ReasonDto) {
+    return this.tx(p, (tx) =>
+      this.idempotent(tx, p, 'invitation.revoke', id, d.idempotencyKey, d, async () => {
+        const result = one(
+          await tx.$queryRaw<
+            Record<string, unknown>[]
+          >`UPDATE rfq_supplier_invitations SET status='REVOKED',version=version+1 WHERE id=${id}::uuid AND rfq_id=${rfqId}::uuid AND version=${d.version} AND status NOT IN ('REVOKED','EXPIRED') RETURNING *`,
+          true,
+        );
+        await this.auditOne(tx, p, 'rfq.invitation_revoked', 'rfq_invitation', id, {
+          ...result,
+          reason: d.reason,
+        });
+        return result;
+      }),
+    );
+  }
+  async deadline(p: AuthenticatedPrincipal, id: string, d: DeadlineDto) {
+    return this.tx(p, (tx) =>
+      this.idempotent(tx, p, 'rfq.deadline.extend', id, d.idempotencyKey, d, async () => {
+        const prior = one(
+          await tx.$queryRaw<
+            Record<string, unknown>[]
+          >`SELECT * FROM rfqs WHERE id=${id}::uuid FOR UPDATE`,
+        );
+        const result = one(
+          await tx.$queryRaw<
+            Record<string, unknown>[]
+          >`UPDATE rfqs SET clarification_deadline=${d.clarificationDeadline}::timestamptz,submission_deadline=${d.submissionDeadline}::timestamptz,version=version+1 WHERE id=${id}::uuid AND version=${d.version} AND status IN ('PUBLISHED','CLARIFICATION_OPEN','QUOTATION_OPEN') AND ${d.submissionDeadline}::timestamptz>now() AND ${d.clarificationDeadline}::timestamptz<=${d.submissionDeadline}::timestamptz RETURNING *`,
+          true,
+        );
+        await this.audit.append(
+          {
+            tenantId: p.tenantId,
+            actorId: p.userId,
+            actorType: p.actorType,
+            correlationId: p.correlationId,
+            action: 'rfq.deadline_extended',
+            objectType: 'rfq',
+            objectId: id,
+            priorState: prior,
+            resultingState: result,
+            metadata: { reason: d.reason },
+          },
+          tx,
+        );
+        return result;
+      }),
+    );
+  }
+  async terminal(
+    p: AuthenticatedPrincipal,
+    id: string,
+    d: ReasonDto,
+    status: 'CANCELLED' | 'CLOSED',
+  ) {
+    return this.tx(p, (tx) =>
+      this.idempotent(tx, p, `rfq.${status.toLowerCase()}`, id, d.idempotencyKey, d, async () => {
+        const prior = one(
+          await tx.$queryRaw<
+            Record<string, unknown>[]
+          >`SELECT * FROM rfqs WHERE id=${id}::uuid FOR UPDATE`,
+        );
+        const allowed =
+          status === 'CANCELLED'
+            ? ['DRAFT', 'READY_FOR_REVIEW', 'PUBLISHED', 'CLARIFICATION_OPEN', 'QUOTATION_OPEN']
+            : ['QUOTATION_CLOSED'];
+        if (!allowed.includes(String(prior.status)))
+          throw new ConflictException('Illegal RFQ transition');
+        const result = one(
+          await tx.$queryRaw<
+            Record<string, unknown>[]
+          >`UPDATE rfqs SET status=${status}::rfq_status,cancelled_at=CASE WHEN ${status}='CANCELLED' THEN now() END,cancellation_reason=CASE WHEN ${status}='CANCELLED' THEN ${d.reason} END,closed_at=CASE WHEN ${status}='CLOSED' THEN now() END,version=version+1 WHERE id=${id}::uuid AND version=${d.version} RETURNING *`,
+          true,
+        );
+        if (status === 'CANCELLED')
+          await tx.$executeRaw`UPDATE rfq_supplier_invitations SET status='REVOKED',version=version+1 WHERE rfq_id=${id}::uuid AND status IN ('DRAFT','SENT','VIEWED','ACCEPTED')`;
+        await this.audit.append(
+          {
+            tenantId: p.tenantId,
+            actorId: p.userId,
+            actorType: p.actorType,
+            correlationId: p.correlationId,
+            action: `rfq.${status.toLowerCase()}`,
+            objectType: 'rfq',
+            objectId: id,
+            priorState: prior,
+            resultingState: result,
+            metadata: { reason: d.reason },
+          },
+          tx,
+        );
+        return result;
+      }),
+    );
+  }
+  async startRevision(p: AuthenticatedPrincipal, id: string, d: CommandDto) {
+    return this.tx(p, async (tx) => {
+      const sid = await this.supplier(tx, p);
+      return this.idempotent(
+        tx,
+        p,
+        'quotation.revision.start',
+        id,
+        d.idempotencyKey,
+        d,
+        async () => {
+          const result = one(
+            await tx.$queryRaw<
+              Record<string, unknown>[]
+            >`UPDATE quotations q SET status='DRAFT',version=version+1 FROM rfqs r,suppliers s WHERE q.id=${id}::uuid AND q.supplier_id=${sid}::uuid AND q.version=${d.version} AND q.status IN ('SUBMITTED','REVISED') AND q.rfq_id=r.id AND r.submission_deadline>now() AND q.supplier_id=s.id AND s.status='ACTIVE' RETURNING q.*`,
+            true,
+          );
+          await this.auditOne(tx, p, 'quotation.revision_started', 'quotation', id, {
+            supplierId: sid,
+            nextRevision: Number(result.current_revision) + 1,
+          });
+          return result;
+        },
+      );
+    });
+  }
+  async quotationDetail(p: AuthenticatedPrincipal, id: string) {
+    return this.tx(p, async (tx) => {
+      const sid = await this.supplier(tx, p);
+      return one(
+        await tx.$queryRaw<
+          unknown[]
+        >`SELECT q.*,COALESCE((SELECT jsonb_agg(to_jsonb(l)) FROM quotation_lines l WHERE l.quotation_id=q.id),'[]') lines,COALESCE((SELECT jsonb_agg(jsonb_build_object('revisionNumber',r.revision_number,'submittedAt',r.submitted_at)) FROM quotation_revisions r WHERE r.quotation_id=q.id),'[]') history FROM quotations q WHERE q.id=${id}::uuid AND q.supplier_id=${sid}::uuid`,
+      );
+    });
+  }
+  async quotationHistory(p: AuthenticatedPrincipal, id: string) {
+    return this.tx(p, async (tx) => {
+      const sid = await this.supplier(tx, p);
+      return tx.$queryRaw`SELECT r.id,r.revision_number,r.submitted_at,r.snapshot FROM quotation_revisions r JOIN quotations q ON q.id=r.quotation_id WHERE q.id=${id}::uuid AND q.supplier_id=${sid}::uuid ORDER BY r.revision_number`;
+    });
+  }
+  async buyerQuotations(p: AuthenticatedPrincipal, rfqId: string, q: PageDto) {
+    return this.tx(p, async (tx) => {
+      const commercial = p.permissions.includes('quotations.read_commercial');
+      const items = commercial
+        ? await tx.$queryRaw`SELECT id,quotation_number,supplier_id,status,currency,total_amount,tax_amount,submitted_at,current_revision FROM quotations WHERE rfq_id=${rfqId}::uuid AND status<>'DRAFT' ORDER BY submitted_at LIMIT ${q.limit} OFFSET ${(q.page - 1) * q.limit}`
+        : await tx.$queryRaw`SELECT id,quotation_number,supplier_id,status,submitted_at,current_revision FROM quotations WHERE rfq_id=${rfqId}::uuid AND status<>'DRAFT' ORDER BY submitted_at LIMIT ${q.limit} OFFSET ${(q.page - 1) * q.limit}`;
+      const total = one(
+        await tx.$queryRaw<
+          { count: number }[]
+        >`SELECT count(*)::int count FROM quotations WHERE rfq_id=${rfqId}::uuid AND status<>'DRAFT'`,
+      ).count;
+      return { items, total, page: q.page, limit: q.limit };
+    });
+  }
+  async invitationDetail(p: AuthenticatedPrincipal, id: string) {
+    return this.tx(p, async (tx) => {
+      const sid = await this.supplier(tx, p);
+      return one(
+        await tx.$queryRaw<
+          unknown[]
+        >`SELECT i.id,i.status,i.expires_at,i.sent_at,i.viewed_at,i.accepted_at,i.declined_at,i.decline_reason,i.version,r.id rfq_id,r.rfq_number,r.title,r.procurement_category,r.currency,r.submission_deadline,r.clarification_deadline,r.required_by,r.delivery_location,r.commercial_terms,r.payment_terms,r.confidentiality_instructions FROM rfq_supplier_invitations i JOIN rfqs r ON r.id=i.rfq_id WHERE i.id=${id}::uuid AND i.supplier_id=${sid}::uuid AND i.status NOT IN ('REVOKED','EXPIRED')`,
+      );
+    });
+  }
+  async clarificationList(p: AuthenticatedPrincipal, rfqId: string) {
+    return this.tx(p, async (tx) => {
+      if (p.actorType === 'supplier_user') {
+        const sid = await this.supplier(tx, p);
+        return tx.$queryRaw`SELECT t.id,t.subject,t.visibility,t.status,t.created_at,COALESCE(jsonb_agg(jsonb_build_object('id',m.id,'body',m.body,'publishedAt',m.published_at,'buyerAuthored',m.author_supplier_id IS NULL) ORDER BY m.published_at),'[]') messages FROM rfq_clarification_threads t JOIN rfq_clarification_messages m ON m.thread_id=t.id WHERE t.rfq_id=${rfqId}::uuid AND (t.visibility='PUBLIC' OR t.requesting_supplier_id=${sid}::uuid) AND EXISTS(SELECT 1 FROM rfq_supplier_invitations i WHERE i.rfq_id=t.rfq_id AND i.supplier_id=${sid}::uuid AND i.status IN ('SENT','VIEWED','ACCEPTED')) GROUP BY t.id`;
+      }
+      return tx.$queryRaw`SELECT t.*,COALESCE(jsonb_agg(to_jsonb(m) ORDER BY m.published_at),'[]') messages FROM rfq_clarification_threads t JOIN rfq_clarification_messages m ON m.thread_id=t.id WHERE t.rfq_id=${rfqId}::uuid GROUP BY t.id`;
+    });
+  }
+  async closeClarification(p: AuthenticatedPrincipal, id: string, d: CommandDto) {
+    return this.tx(p, (tx) =>
+      this.idempotent(tx, p, 'clarification.close', id, d.idempotencyKey, d, async () => {
+        const result = one(
+          await tx.$queryRaw<
+            Record<string, unknown>[]
+          >`UPDATE rfq_clarification_threads SET status='CLOSED',closed_at=now() WHERE id=${id}::uuid AND status='OPEN' RETURNING *`,
+          true,
+        );
+        await this.auditOne(tx, p, 'rfq.clarification_closed', 'clarification', id, result);
+        return result;
+      }),
+    );
+  }
+  async updateQuote(p: AuthenticatedPrincipal, id: string, d: UpdateQuoteDto) {
+    return this.tx(p, async (tx) => {
+      const sid = await this.supplier(tx, p);
+      const result = one(
+        await tx.$queryRaw<
+          Record<string, unknown>[]
+        >`UPDATE quotations SET currency=${d.currency},validity_date=${d.validityDate}::date,payment_terms=${d.paymentTerms ?? null},version=version+1 WHERE id=${id}::uuid AND supplier_id=${sid}::uuid AND status='DRAFT' AND version=${d.version} RETURNING *`,
+        true,
+      );
+      await this.auditOne(tx, p, 'quotation.draft_updated', 'quotation', id, { supplierId: sid });
+      return result;
+    });
+  }
+  async updateQuoteLine(
+    p: AuthenticatedPrincipal,
+    quotationId: string,
+    id: string,
+    d: UpdateQuoteLineDto,
+  ) {
+    return this.tx(p, async (tx) => {
+      const sid = await this.supplier(tx, p);
+      const result = one(
+        await tx.$queryRaw<
+          Record<string, unknown>[]
+        >`UPDATE quotation_lines l SET offered_description=${d.offeredDescription},quantity=${d.quantity}::numeric,unit_price=${d.unitPrice}::numeric,discount=${d.discount}::numeric,tax=${d.tax}::numeric,compliance_response=${d.complianceResponse},version=version+1 FROM quotations q,rfqs r WHERE l.id=${id}::uuid AND l.quotation_id=${quotationId}::uuid AND l.version=${d.version} AND q.id=l.quotation_id AND q.supplier_id=${sid}::uuid AND q.status='DRAFT' AND q.rfq_id=r.id AND r.submission_deadline>now() RETURNING l.*`,
+        true,
+      );
+      await this.auditOne(tx, p, 'quotation.line_updated', 'quotation_line', id, {
         supplierId: sid,
-        revision: q.current_revision,
       });
-      return q;
+      return result;
+    });
+  }
+  async removeQuoteLine(
+    p: AuthenticatedPrincipal,
+    quotationId: string,
+    id: string,
+    version: number,
+  ) {
+    return this.tx(p, async (tx) => {
+      const sid = await this.supplier(tx, p);
+      const result = one(
+        await tx.$queryRaw<
+          Record<string, unknown>[]
+        >`DELETE FROM quotation_lines l USING quotations q WHERE l.id=${id}::uuid AND l.quotation_id=${quotationId}::uuid AND l.version=${version} AND q.id=l.quotation_id AND q.supplier_id=${sid}::uuid AND q.status='DRAFT' RETURNING l.*`,
+        true,
+      );
+      await this.auditOne(tx, p, 'quotation.line_removed', 'quotation_line', id, {
+        supplierId: sid,
+      });
+      return result;
     });
   }
 }
@@ -611,5 +1154,196 @@ export class SourcingController {
   @RequirePermissions('supplier_portal.quotations.withdraw')
   withdraw(@Req() r: Request, @Param('id', ParseUUIDPipe) id: string, @Body() d: ReasonDto) {
     return this.s.quoteAction(actor(r), id, d, 'WITHDRAWN');
+  }
+  @Get('suppliers/:id/qualifications') @RequirePermissions('suppliers.read') qualifications(
+    @Req() r: Request,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.s.qualifications(actor(r), id);
+  }
+  @Post('suppliers/:id/qualifications/review')
+  @RequirePermissions('suppliers.qualify')
+  reviewQualification(
+    @Req() r: Request,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() d: ReviewQualificationDto,
+  ) {
+    return this.s.reviewQualification(actor(r), id, d);
+  }
+  @Post('suppliers/:supplierId/compliance/:id/verify')
+  @RequirePermissions('supplier_compliance.manage')
+  verifyCompliance(
+    @Req() r: Request,
+    @Param('supplierId', ParseUUIDPipe) supplierId: string,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() d: VerifyComplianceDto,
+  ) {
+    return this.s.verifyCompliance(actor(r), supplierId, id, d);
+  }
+  @Post('supplier-categories') @RequirePermissions('suppliers.update') category(
+    @Req() r: Request,
+    @Body() d: CategoryDto,
+  ) {
+    return this.s.category(actor(r), d);
+  }
+  @Post('suppliers/:id/categories/:categoryId')
+  @RequirePermissions('suppliers.update')
+  assignCategory(
+    @Req() r: Request,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('categoryId', ParseUUIDPipe) categoryId: string,
+  ) {
+    return this.s.assignCategory(actor(r), id, categoryId);
+  }
+  @Delete('suppliers/:id/categories/:categoryId')
+  @RequirePermissions('suppliers.update')
+  removeCategory(
+    @Req() r: Request,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('categoryId', ParseUUIDPipe) categoryId: string,
+  ) {
+    return this.s.removeCategory(actor(r), id, categoryId);
+  }
+  @Get('rfqs/:id') @RequirePermissions('rfqs.read') rfqDetail(
+    @Req() r: Request,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.s.rfqDetail(actor(r), id);
+  }
+  @Patch('rfqs/:id') @RequirePermissions('rfqs.update_draft') updateRfq(
+    @Req() r: Request,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() d: UpdateRfqDto,
+  ) {
+    return this.s.updateRfq(actor(r), id, d);
+  }
+  @Post('rfqs/:id/lines') @RequirePermissions('rfqs.update_draft') addRfqLine(
+    @Req() r: Request,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() d: RfqLineDto,
+  ) {
+    return this.s.addRfqLine(actor(r), id, d);
+  }
+  @Patch('rfqs/:rfqId/lines/:id') @RequirePermissions('rfqs.update_draft') updateRfqLine(
+    @Req() r: Request,
+    @Param('rfqId', ParseUUIDPipe) rfqId: string,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() d: UpdateRfqLineDto,
+  ) {
+    return this.s.updateRfqLine(actor(r), rfqId, id, d);
+  }
+  @Delete('rfqs/:rfqId/lines/:id') @RequirePermissions('rfqs.update_draft') removeRfqLine(
+    @Req() r: Request,
+    @Param('rfqId', ParseUUIDPipe) rfqId: string,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query('version', ParseIntPipe) version: number,
+  ) {
+    return this.s.removeRfqLine(actor(r), rfqId, id, Number(version));
+  }
+  @Post('rfqs/:rfqId/invitations/:id/revoke')
+  @RequirePermissions('rfq_invitations.manage')
+  revokeInvitation(
+    @Req() r: Request,
+    @Param('rfqId', ParseUUIDPipe) rfqId: string,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() d: ReasonDto,
+  ) {
+    return this.s.revokeInvitation(actor(r), rfqId, id, d);
+  }
+  @Post('rfqs/:id/deadline-extension') @RequirePermissions('rfqs.extend_deadline') deadline(
+    @Req() r: Request,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() d: DeadlineDto,
+  ) {
+    return this.s.deadline(actor(r), id, d);
+  }
+  @Post('rfqs/:id/cancel') @RequirePermissions('rfqs.cancel') cancel(
+    @Req() r: Request,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() d: ReasonDto,
+  ) {
+    return this.s.terminal(actor(r), id, d, 'CANCELLED');
+  }
+  @Post('rfqs/:id/close') @RequirePermissions('rfqs.close') close(
+    @Req() r: Request,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() d: ReasonDto,
+  ) {
+    return this.s.terminal(actor(r), id, d, 'CLOSED');
+  }
+  @Post('supplier-portal/quotations/:id/revisions/start')
+  @RequirePermissions('supplier_portal.quotations.revise')
+  startRevision(@Req() r: Request, @Param('id', ParseUUIDPipe) id: string, @Body() d: CommandDto) {
+    return this.s.startRevision(actor(r), id, d);
+  }
+  @Get('supplier-portal/quotations/:id')
+  @RequirePermissions('supplier_portal.rfqs.read_invited')
+  quotationDetail(@Req() r: Request, @Param('id', ParseUUIDPipe) id: string) {
+    return this.s.quotationDetail(actor(r), id);
+  }
+  @Get('supplier-portal/quotations/:id/history')
+  @RequirePermissions('supplier_portal.rfqs.read_invited')
+  quotationHistory(@Req() r: Request, @Param('id', ParseUUIDPipe) id: string) {
+    return this.s.quotationHistory(actor(r), id);
+  }
+  @Get('rfqs/:id/quotations') @RequirePermissions('quotations.read') buyerQuotations(
+    @Req() r: Request,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() q: PageDto,
+  ) {
+    return this.s.buyerQuotations(actor(r), id, q);
+  }
+  @Get('supplier-portal/invitations/:id')
+  @RequirePermissions('supplier_portal.rfqs.read_invited')
+  invitationDetail(@Req() r: Request, @Param('id', ParseUUIDPipe) id: string) {
+    return this.s.invitationDetail(actor(r), id);
+  }
+  @Get('rfqs/:id/clarifications')
+  @RequirePermissions('rfq_clarifications.manage')
+  clarificationList(@Req() r: Request, @Param('id', ParseUUIDPipe) id: string) {
+    return this.s.clarificationList(actor(r), id);
+  }
+  @Post('rfq-clarifications/:id/close')
+  @RequirePermissions('rfq_clarifications.manage')
+  closeClarification(
+    @Req() r: Request,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() d: CommandDto,
+  ) {
+    return this.s.closeClarification(actor(r), id, d);
+  }
+  @Patch('supplier-portal/quotations/:id')
+  @RequirePermissions('supplier_portal.quotations.create')
+  updateQuote(
+    @Req() r: Request,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() d: UpdateQuoteDto,
+  ) {
+    return this.s.updateQuote(actor(r), id, d);
+  }
+  @Patch('supplier-portal/quotations/:quotationId/lines/:id')
+  @RequirePermissions('supplier_portal.quotations.create')
+  updateQuoteLine(
+    @Req() r: Request,
+    @Param('quotationId', ParseUUIDPipe) quotationId: string,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() d: UpdateQuoteLineDto,
+  ) {
+    return this.s.updateQuoteLine(actor(r), quotationId, id, d);
+  }
+  @Delete('supplier-portal/quotations/:quotationId/lines/:id')
+  @RequirePermissions('supplier_portal.quotations.create')
+  removeQuoteLine(
+    @Req() r: Request,
+    @Param('quotationId', ParseUUIDPipe) quotationId: string,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query('version', ParseIntPipe) version: number,
+  ) {
+    return this.s.removeQuoteLine(actor(r), quotationId, id, version);
+  }
+  @Get('supplier-portal/rfqs/:id/clarifications')
+  @RequirePermissions('supplier_portal.rfqs.read_invited')
+  supplierClarificationList(@Req() r: Request, @Param('id', ParseUUIDPipe) id: string) {
+    return this.s.clarificationList(actor(r), id);
   }
 }

@@ -246,6 +246,9 @@ export default function Page() {
             <Records view={view} data={data} open={open} />
             <Pager data={data} setPage={(page) => setQuery((q) => ({ ...q, page }))} />
             {view === 'policies' && <PolicyForm done={load} fail={setError} />}
+            {(view === 'suppliers' || view === 'rfqs') && (
+              <SourcingCreate view={view} done={load} fail={setError} />
+            )}
           </>
         )}
       </section>
@@ -1146,4 +1149,64 @@ function PolicyForm({
 }
 function date(v: unknown) {
   return v ? new Date(String(v)).toLocaleDateString('en') : '';
+}
+
+function SourcingCreate({
+  view,
+  done,
+  fail,
+}: {
+  view: 'suppliers' | 'rfqs';
+  done: () => Promise<void>;
+  fail: (message: string) => void;
+}) {
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const body = Object.fromEntries(
+      [...new FormData(event.currentTarget)].filter(([, value]) => value !== ''),
+    );
+    try {
+      await api(view === 'suppliers' ? '/suppliers' : '/rfqs', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+      event.currentTarget.reset();
+      await done();
+    } catch (error) {
+      fail(error instanceof Error ? error.message : 'Unable to save sourcing record');
+    }
+  }
+  return (
+    <form
+      className="request-form"
+      onSubmit={(event) => void submit(event)}
+      aria-label={view === 'suppliers' ? 'Create supplier' : 'Create RFQ draft'}
+    >
+      <h3 className="wide">{view === 'suppliers' ? 'Create supplier' : 'Create RFQ draft'}</h3>
+      {view === 'suppliers' ? (
+        <>
+          <Field name="legalName" required />
+          <Field name="tradingName" />
+          <Field name="supplierType" required />
+          <Field name="country" required />
+          <Field name="defaultCurrency" required />
+          <Field name="primaryEmail" type="email" />
+          <Field name="primaryPhone" />
+        </>
+      ) : (
+        <>
+          <Field name="title" required />
+          <Field name="procurementCategory" required />
+          <Field name="currency" required />
+          <Field name="clarificationDeadline" type="datetime-local" required />
+          <Field name="submissionDeadline" type="datetime-local" required />
+          <Field name="requiredBy" type="date" required />
+          <Field name="deliveryLocation" required />
+        </>
+      )}
+      <button className="pp-button wide">
+        {view === 'suppliers' ? 'Create supplier' : 'Create RFQ draft'}
+      </button>
+    </form>
+  );
 }
