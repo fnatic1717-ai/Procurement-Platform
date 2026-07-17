@@ -49,6 +49,12 @@ runWhenDatabase('PostgreSQL tenant isolation', () => {
         'utf8',
       ),
     );
+    await client.query(
+      readFileSync(
+        new URL('../prisma/migrations/0003_phase_2b_supplier_rfq/migration.sql', import.meta.url),
+        'utf8',
+      ),
+    );
 
     const seeded = await client.query(`
       INSERT INTO tenants(name, slug)
@@ -285,5 +291,67 @@ runWhenDatabase('PostgreSQL tenant isolation', () => {
     );
     expect(result.rowCount).toBe(tables.length);
     expect(result.rows.every((row) => row.relrowsecurity && row.relforcerowsecurity)).toBe(true);
+  });
+
+  it('isolates Phase 2B suppliers across tenants', async () => {
+    const supplier = await asTenant(tenantA, async () =>
+      client.query(
+        "INSERT INTO suppliers(tenant_id,supplier_number,legal_name,supplier_type,country,default_currency,status,qualification_status) VALUES($1,'SUP-1','Tenant A Supplier','company','US','USD','ACTIVE','APPROVED') RETURNING id",
+        [tenantA],
+      ),
+    );
+    const hidden = await asTenant(tenantB, async () =>
+      client.query('SELECT id FROM suppliers WHERE id=$1', [supplier.rows[0].id]),
+    );
+    expect(hidden.rowCount).toBe(0);
+    const changed = await asTenant(tenantB, async () =>
+      client.query("UPDATE suppliers SET legal_name='Compromised' WHERE id=$1", [
+        supplier.rows[0].id,
+      ]),
+    );
+    expect(changed.rowCount).toBe(0);
+    await expect(
+      asTenant(tenantB, async () =>
+        client.query(
+          "INSERT INTO supplier_contacts(tenant_id,supplier_id,full_name,contact_type) VALUES($1,$2,'Attacker','sales')",
+          [tenantB, supplier.rows[0].id],
+        ),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('forces RLS on every Phase 2B tenant-owned table', async () => {
+    const tables = [
+      'suppliers',
+      'supplier_contacts',
+      'supplier_addresses',
+      'supplier_categories',
+      'supplier_category_assignments',
+      'supplier_qualification_records',
+      'supplier_compliance_documents',
+      'supplier_internal_notes',
+      'supplier_user_memberships',
+      'rfqs',
+      'rfq_lines',
+      'rfq_purchase_request_links',
+      'rfq_supplier_invitations',
+      'rfq_clarification_threads',
+      'rfq_clarification_messages',
+      'quotations',
+      'quotation_lines',
+      'quotation_revisions',
+      'quotation_attachments',
+      'rfq_terms',
+      'rfq_activity_events',
+      'sourcing_idempotency',
+    ];
+    const result = await client.query(
+      'SELECT relname,relrowsecurity,relforcerowsecurity FROM pg_class WHERE relname=ANY($1)',
+      [tables],
+    );
+    expect(result.rowCount).toBe(tables.length);
+    expect(result.rows.every((record) => record.relrowsecurity && record.relforcerowsecurity)).toBe(
+      true,
+    );
   });
 });

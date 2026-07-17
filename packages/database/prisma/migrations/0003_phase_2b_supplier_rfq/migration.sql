@@ -36,3 +36,6 @@ CREATE FUNCTION prevent_phase_2b_immutable_change() RETURNS trigger LANGUAGE plp
 CREATE TRIGGER quotation_revisions_immutable BEFORE UPDATE OR DELETE ON quotation_revisions FOR EACH ROW EXECUTE FUNCTION prevent_phase_2b_immutable_change();
 CREATE TRIGGER clarification_messages_immutable BEFORE UPDATE OR DELETE ON rfq_clarification_messages FOR EACH ROW EXECUTE FUNCTION prevent_phase_2b_immutable_change();
 CREATE TRIGGER rfq_activity_immutable BEFORE UPDATE OR DELETE ON rfq_activity_events FOR EACH ROW EXECUTE FUNCTION prevent_phase_2b_immutable_change();
+CREATE TABLE sourcing_idempotency (tenant_id uuid NOT NULL, actor_id uuid NOT NULL, operation varchar(100) NOT NULL, object_id uuid NOT NULL, idempotency_key varchar(128) NOT NULL, response jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(tenant_id,actor_id,operation,object_id,idempotency_key));
+ALTER TABLE sourcing_idempotency ENABLE ROW LEVEL SECURITY; ALTER TABLE sourcing_idempotency FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON sourcing_idempotency USING (tenant_id=NULLIF(current_setting('app.current_tenant_id',true),'')::uuid) WITH CHECK (tenant_id=NULLIF(current_setting('app.current_tenant_id',true),'')::uuid);

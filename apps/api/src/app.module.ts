@@ -7,6 +7,7 @@ import { AuthenticationGuard } from './auth/auth.guard.js';
 import { AuthorizationGuard } from './authorization/authorization.guard.js';
 import { PolicyService } from './authorization/policy.js';
 import { FileAuthorizationService } from './files/files.js';
+import { SourcingController, SourcingService } from './sourcing/sourcing.js';
 import { HealthController } from './health/health.js';
 import {
   ApprovalController,
@@ -24,10 +25,12 @@ import {
     ApprovalController,
     IntakeController,
     ApprovalPolicyController,
+    SourcingController,
   ],
   providers: [
     AuditService,
     PurchaseRequestService,
+    SourcingService,
     PolicyService,
     PrincipalLoader,
     authProviderFactory,
