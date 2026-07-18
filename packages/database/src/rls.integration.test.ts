@@ -311,7 +311,7 @@ runWhenDatabase('PostgreSQL tenant isolation', () => {
       ),
     );
     const hidden = await asTenant(tenantB, async () =>
-      client.query('SELECT id FROM suppliers WHERE id=$1', [supplier.rows[0].id]),
+      client.query('SELECT id FROM suppliers WHERE id=$1::uuid', [supplier.rows[0].id]),
     );
     expect(hidden.rowCount).toBe(0);
     const changed = await asTenant(tenantB, async () =>
@@ -371,15 +371,15 @@ runWhenDatabase('PostgreSQL tenant isolation', () => {
         "INSERT INTO users(email,display_name,actor_type) VALUES('supplier-a@example.com','Supplier User A','supplier_user'),('supplier-b@example.com','Supplier User B','supplier_user') RETURNING id",
       );
       await client.query(
-        "INSERT INTO tenant_memberships(tenant_id,user_id,member_type,status) VALUES($1,$2,'supplier','active'),($1,$3,'supplier','active')",
+        "INSERT INTO tenant_memberships(tenant_id,user_id,member_type,status) VALUES($1::uuid,$2::uuid,'supplier','active'),($1::uuid,$3::uuid,'supplier','active')",
         [tenantA, supplierUsers.rows[0].id, supplierUsers.rows[1].id],
       );
       const suppliers = await client.query(
-        "INSERT INTO suppliers(tenant_id,supplier_number,legal_name,supplier_type,country,default_currency,status,qualification_status) VALUES($1,'SUP-A','Supplier A','company','US','USD','ACTIVE','APPROVED'),($1,'SUP-B','Supplier B','company','US','USD','ACTIVE','APPROVED') RETURNING id",
+        "INSERT INTO suppliers(tenant_id,supplier_number,legal_name,supplier_type,country,default_currency,status,qualification_status) VALUES($1::uuid,'SUP-A','Supplier A','company','US','USD','ACTIVE','APPROVED'),($1::uuid,'SUP-B','Supplier B','company','US','USD','ACTIVE','APPROVED') RETURNING id",
         [tenantA],
       );
       await client.query(
-        'INSERT INTO supplier_user_memberships(tenant_id,supplier_id,user_id) VALUES($1,$2,$3),($1,$4,$5)',
+        'INSERT INTO supplier_user_memberships(tenant_id,supplier_id,user_id) VALUES($1::uuid,$2::uuid,$3::uuid),($1::uuid,$4::uuid,$5::uuid)',
         [
           tenantA,
           suppliers.rows[0].id,
@@ -389,11 +389,11 @@ runWhenDatabase('PostgreSQL tenant isolation', () => {
         ],
       );
       const rfq = await client.query(
-        "INSERT INTO rfqs(tenant_id,rfq_number,title,procurement_category,buyer_id,currency,submission_deadline,clarification_deadline,required_by,delivery_location,status) VALUES($1,'RFQ-SEC','Confidential sourcing','IT',$2,'USD',now()+interval '2 day',now()+interval '1 day',current_date+7,'HQ','PUBLISHED') RETURNING id",
+        "INSERT INTO rfqs(tenant_id,rfq_number,title,procurement_category,buyer_id,currency,submission_deadline,clarification_deadline,required_by,delivery_location,status) VALUES($1::uuid,'RFQ-SEC','Confidential sourcing','IT',$2::uuid,'USD',now()+interval '2 day',now()+interval '1 day',current_date+7,'HQ','PUBLISHED') RETURNING id",
         [tenantA, userA],
       );
       const rfqLine = await client.query(
-        "INSERT INTO rfq_lines(tenant_id,rfq_id,description,item_type,quantity,unit_of_measure,specifications,required_by,delivery_location,category,line_sequence) VALUES($1,$2,'Secure endpoint','goods',1,'EA','Managed endpoint',current_date+7,'HQ','IT',1) RETURNING id",
+        "INSERT INTO rfq_lines(tenant_id,rfq_id,description,item_type,quantity,unit_of_measure,specifications,required_by,delivery_location,category,line_sequence) VALUES($1::uuid,$2::uuid,'Secure endpoint','goods',1,'EA','Managed endpoint',current_date+7,'HQ','IT',1) RETURNING id",
         [tenantA, rfq.rows[0].id],
       );
       const quotationIds: string[] = [];
@@ -403,21 +403,21 @@ runWhenDatabase('PostgreSQL tenant isolation', () => {
       const fileIds: string[] = [];
       for (const [index, supplier] of suppliers.rows.entries()) {
         const invitation = await client.query(
-          "INSERT INTO rfq_supplier_invitations(tenant_id,rfq_id,supplier_id,status,expires_at) VALUES($1,$2,$3,'ACCEPTED',now()+interval '1 day') RETURNING id",
+          "INSERT INTO rfq_supplier_invitations(tenant_id,rfq_id,supplier_id,status,expires_at) VALUES($1::uuid,$2::uuid,$3::uuid,'ACCEPTED',now()+interval '1 day') RETURNING id",
           [tenantA, rfq.rows[0].id, supplier.id],
         );
         const quotation = await client.query(
-          "INSERT INTO quotations(tenant_id,quotation_number,rfq_id,supplier_id,currency,status) VALUES($1,'Q-'||substr($3::text,1,8),$2,$3,'USD','SUBMITTED') RETURNING id",
+          "INSERT INTO quotations(tenant_id,quotation_number,rfq_id,supplier_id,currency,status) VALUES($1::uuid,'Q-'||substr($3::uuid::text,1,8),$2::uuid,$3::uuid,'USD','SUBMITTED') RETURNING id",
           [tenantA, rfq.rows[0].id, supplier.id],
         );
         const line = await client.query(
-          "INSERT INTO quotation_lines(tenant_id,quotation_id,rfq_id,rfq_line_id,offered_description,quantity,unit_price,compliance_response) VALUES($1,$2,$3,$4,'Compliant endpoint',1,100,'COMPLIANT') RETURNING id",
+          "INSERT INTO quotation_lines(tenant_id,quotation_id,rfq_id,rfq_line_id,offered_description,quantity,unit_price,compliance_response) VALUES($1::uuid,$2::uuid,$3::uuid,$4::uuid,'Compliant endpoint',1,100,'COMPLIANT') RETURNING id",
           [tenantA, quotation.rows[0].id, rfq.rows[0].id, rfqLine.rows[0].id],
         );
         invitationIds.push(invitation.rows[0].id);
         quotationIds.push(quotation.rows[0].id);
         const file = await client.query(
-          "INSERT INTO file_objects(tenant_id,storage_key,filename,mime_type,size_bytes,checksum_sha256,uploader_id,classification,upload_state,scan_status) VALUES($1,$2,$3,'application/pdf',10,$4,$5,'supplier_visible','clean','clean') RETURNING id",
+          "INSERT INTO file_objects(tenant_id,storage_key,filename,mime_type,size_bytes,checksum_sha256,uploader_id,classification,upload_state,scan_status) VALUES($1::uuid,$2,$3,'application/pdf',10,$4,$5::uuid,'supplier_visible','clean','clean') RETURNING id",
           [
             tenantA,
             `supplier/${supplier.id}/quotation.pdf`,
@@ -427,7 +427,7 @@ runWhenDatabase('PostgreSQL tenant isolation', () => {
           ],
         );
         const attachment = await client.query(
-          'INSERT INTO quotation_attachments(tenant_id,quotation_id,file_object_id) VALUES($1,$2,$3) RETURNING id',
+          'INSERT INTO quotation_attachments(tenant_id,quotation_id,file_object_id) VALUES($1::uuid,$2::uuid,$3::uuid) RETURNING id',
           [tenantA, quotation.rows[0].id, file.rows[0].id],
         );
         lineIds.push(line.rows[0].id);
@@ -457,15 +457,15 @@ runWhenDatabase('PostgreSQL tenant isolation', () => {
     async function asPersistedSupplier<T>(work: () => Promise<T>): Promise<T> {
       return asTenant(tenantA, async () => {
         await client.query(
-          "SELECT set_config('app.actor_type','supplier_user',true),set_config('app.current_actor_id',$1,true)",
+          "SELECT set_config('app.actor_type','supplier_user',true),set_config('app.current_actor_id',$1::uuid::text,true)",
           [seeded.supplierUserA],
         );
         const membership = await client.query(
-          'SELECT supplier_id FROM supplier_user_memberships WHERE user_id=$1 AND active=true',
+          'SELECT supplier_id FROM supplier_user_memberships WHERE user_id=$1::uuid AND active=true',
           [seeded.supplierUserA],
         );
         expect(membership.rows).toEqual([{ supplier_id: seeded.supplierA }]);
-        await client.query("SELECT set_config('app.current_supplier_id',$1,true)", [
+        await client.query("SELECT set_config('app.current_supplier_id',$1::uuid::text,true)", [
           membership.rows[0].supplier_id,
         ]);
         return work();
@@ -490,14 +490,14 @@ runWhenDatabase('PostgreSQL tenant isolation', () => {
     await expect(
       asPersistedSupplier(() =>
         client.query(
-          "INSERT INTO rfq_supplier_invitations(tenant_id,rfq_id,supplier_id,status,expires_at) VALUES($1,$2,$3,'SENT',now()+interval '1 day')",
+          "INSERT INTO rfq_supplier_invitations(tenant_id,rfq_id,supplier_id,status,expires_at) VALUES($1::uuid,$2::uuid,$3::uuid,'SENT',now()+interval '1 day')",
           [tenantA, seeded.rfqId, seeded.supplierA],
         ),
       ),
     ).rejects.toMatchObject({ code: '42501' });
     expect(
       await asPersistedSupplier(() =>
-        client.query('UPDATE quotations SET currency=$1 WHERE id=$2', [
+        client.query('UPDATE quotations SET currency=$1 WHERE id=$2::uuid', [
           'EUR',
           seeded.competingQuotation,
         ]),
@@ -505,12 +505,12 @@ runWhenDatabase('PostgreSQL tenant isolation', () => {
     ).toMatchObject({ rowCount: 0 });
     expect(
       await asPersistedSupplier(() =>
-        client.query('DELETE FROM quotations WHERE id=$1', [seeded.competingQuotation]),
+        client.query('DELETE FROM quotations WHERE id=$1::uuid', [seeded.competingQuotation]),
       ),
     ).toMatchObject({ rowCount: 0 });
     expect(
       await asPersistedSupplier(() =>
-        client.query('UPDATE rfq_supplier_invitations SET status=$1 WHERE id=$2', [
+        client.query('UPDATE rfq_supplier_invitations SET status=$1 WHERE id=$2::uuid', [
           'DECLINED',
           seeded.competingInvitation,
         ]),
@@ -518,32 +518,36 @@ runWhenDatabase('PostgreSQL tenant isolation', () => {
     ).toMatchObject({ rowCount: 0 });
     expect(
       await asPersistedSupplier(() =>
-        client.query('DELETE FROM rfq_supplier_invitations WHERE id=$1', [
+        client.query('DELETE FROM rfq_supplier_invitations WHERE id=$1::uuid', [
           seeded.competingInvitation,
         ]),
       ),
     ).toMatchObject({ rowCount: 0 });
     expect(
       await asPersistedSupplier(() =>
-        client.query('UPDATE quotation_lines SET unit_price=1 WHERE id=$1', [seeded.competingLine]),
+        client.query('UPDATE quotation_lines SET unit_price=1 WHERE id=$1::uuid', [
+          seeded.competingLine,
+        ]),
       ),
     ).toMatchObject({ rowCount: 0 });
     expect(
       await asPersistedSupplier(() =>
-        client.query('DELETE FROM quotation_attachments WHERE id=$1', [seeded.competingAttachment]),
+        client.query('DELETE FROM quotation_attachments WHERE id=$1::uuid', [
+          seeded.competingAttachment,
+        ]),
       ),
     ).toMatchObject({ rowCount: 0 });
     await expect(
       asPersistedSupplier(() =>
         client.query(
-          'INSERT INTO quotation_attachments(tenant_id,quotation_id,file_object_id) VALUES($1,$2,$3)',
+          'INSERT INTO quotation_attachments(tenant_id,quotation_id,file_object_id) VALUES($1::uuid,$2::uuid,$3::uuid)',
           [tenantA, seeded.competingQuotation, seeded.competingFile],
         ),
       ),
     ).rejects.toMatchObject({ code: '42501' });
     expect(
       await asPersistedSupplier(() =>
-        client.query('UPDATE file_objects SET filename=$1 WHERE id=$2', [
+        client.query('UPDATE file_objects SET filename=$1 WHERE id=$2::uuid', [
           'tampered.pdf',
           seeded.competingFile,
         ]),
@@ -551,13 +555,13 @@ runWhenDatabase('PostgreSQL tenant isolation', () => {
     ).toMatchObject({ rowCount: 0 });
     expect(
       await asPersistedSupplier(() =>
-        client.query('DELETE FROM file_objects WHERE id=$1', [seeded.competingFile]),
+        client.query('DELETE FROM file_objects WHERE id=$1::uuid', [seeded.competingFile]),
       ),
     ).toMatchObject({ rowCount: 0 });
     await expect(
       asPersistedSupplier(() =>
         client.query(
-          "INSERT INTO file_objects(tenant_id,storage_key,filename,mime_type,size_bytes,checksum_sha256,uploader_id,classification,upload_state,scan_status) VALUES($1,'supplier/attack','attack.pdf','application/pdf',1,repeat('a',64),$2,'supplier_visible','clean','clean')",
+          "INSERT INTO file_objects(tenant_id,storage_key,filename,mime_type,size_bytes,checksum_sha256,uploader_id,classification,upload_state,scan_status) VALUES($1::uuid,'supplier/attack','attack.pdf','application/pdf',1,repeat('a',64),$2::uuid,'supplier_visible','clean','clean')",
           [tenantA, seeded.supplierUserB],
         ),
       ),
@@ -565,7 +569,7 @@ runWhenDatabase('PostgreSQL tenant isolation', () => {
     await expect(
       asPersistedSupplier(() =>
         client.query(
-          "INSERT INTO quotation_lines(tenant_id,quotation_id,rfq_id,rfq_line_id,offered_description,quantity,unit_price,compliance_response) VALUES($1,$2,$3,$4,'Attack',1,1,'COMPLIANT')",
+          "INSERT INTO quotation_lines(tenant_id,quotation_id,rfq_id,rfq_line_id,offered_description,quantity,unit_price,compliance_response) VALUES($1::uuid,$2::uuid,$3::uuid,$4::uuid,'Attack',1,1,'COMPLIANT')",
           [tenantA, seeded.competingQuotation, seeded.rfqId, seeded.rfqLineId],
         ),
       ),
