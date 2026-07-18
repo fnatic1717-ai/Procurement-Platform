@@ -1,1212 +1,844 @@
 'use client';
-import { FormEvent, useCallback, useEffect, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  Button,
+  EmptyState,
+  ErrorState,
+  Input,
+  LoadingState,
+  Select,
+  StatusBadge,
+  Table,
+} from '@procurement/ui';
+import {
+  ApiError,
+  can,
+  idem,
+  normalizeError,
+  pageParams,
+  validTransitionActions,
+  validateRfqDraft,
+  visibleModules,
+  type RfqStatus,
+  type Session,
+} from './sourcing';
+
 type Json = Record<string, unknown>;
-type View =
-  | 'requests'
-  | 'create'
-  | 'approvals'
-  | 'intake'
-  | 'policies'
-  | 'suppliers'
-  | 'rfqs'
-  | 'invitations';
-type PageResult = { items: Json[]; total: number; page: number; limit: number };
+type PageResult<T = Json> = { items: T[]; total: number; page: number; limit: number };
+type Rfq = Json & {
+  id: string;
+  rfq_number?: string;
+  title?: string;
+  status: RfqStatus;
+  currency?: string;
+  version: number;
+  lines?: Json[];
+  invitations?: Json[];
+};
+type View = 'overview' | 'rfqs' | 'new' | 'detail' | 'suppliers' | 'activity';
 const blank: PageResult = { items: [], total: 0, page: 1, limit: 25 };
-async function api(path: string, init?: RequestInit) {
-  const response = await fetch(`/api/v1${path}`, {
+const text = (v: unknown) => (v == null ? '' : String(v));
+const date = (v: unknown) => (v ? new Date(String(v)).toLocaleString() : 'Not set');
+const statusTone = (s: string) =>
+  s.includes('CANCEL')
+    ? 'danger'
+    : s.includes('DRAFT') || s.includes('REVIEW')
+      ? 'warning'
+      : s.includes('CLOSED') || s === 'PUBLISHED'
+        ? 'success'
+        : 'info';
+
+async function api<T>(
+  path: string,
+  session: Session,
+  init?: RequestInit,
+  signal?: AbortSignal,
+): Promise<T> {
+  const request: RequestInit = {
     credentials: 'include',
     ...init,
-    headers: { 'content-type': 'application/json', ...(init?.headers ?? {}) },
-  });
-  const body = (await response
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer dev:${session.token}`,
+      'x-tenant-id': session.tenantId,
+      ...(init?.headers ?? {}),
+    },
+  };
+  if (signal) request.signal = signal;
+  const response = await fetch(`/api/v1${path}`, request);
+  const body = await response
     .json()
-    .catch(() => ({ message: 'The server returned an invalid response.' }))) as Json;
-  if (!response.ok)
-    throw new Error(String(body.message ?? 'The operation could not be completed.'));
-  return body;
+    .catch(() => ({ message: 'The server returned an invalid response.' }));
+  if (!response.ok) throw normalizeError(response.status, body);
+  return body as T;
 }
-const text = (v: unknown) => (v == null ? '' : String(v));
-const key = () => crypto.randomUUID();
+function defaultSession(): Session | null {
+  if (typeof window === 'undefined') return null;
+  const stored = window.localStorage.getItem('procurement.session');
+  return stored ? (JSON.parse(stored) as Session) : null;
+}
 export default function Page() {
-  const [view, setView] = useState<View>('requests');
-  const [selected, setSelected] = useState<Json | null>(null);
-  const [data, setData] = useState<PageResult>(blank);
-  const [query, setQuery] = useState({
-    search: '',
-    status: '',
-    sort: 'createdAt',
-    direction: 'desc',
-    page: 1,
-    priority: '',
-    department: '',
-    category: '',
-    requiredFrom: '',
-    requiredTo: '',
-    requesterId: '',
-    buyerId: '',
-  });
+  const [session, setSession] = useState<Session | null>(null);
+  const [collapsed, setCollapsed] = useState(false);
+  const [view, setView] = useState<View>('overview');
+  const [rfqs, setRfqs] = useState<PageResult>(blank);
+  const [suppliers, setSuppliers] = useState<PageResult>(blank);
+  const [selected, setSelected] = useState<Rfq | null>(null);
+  const [quotations, setQuotations] = useState<PageResult>(blank);
+  const [clarifications, setClarifications] = useState<Json[]>([]);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const load = useCallback(async () => {
-    setBusy(true);
-    setError('');
-    try {
-      if (view === 'create') {
-        setData(blank);
-        return;
+  const [error, setError] = useState<ApiError | Error | null>(null);
+  const [success, setSuccess] = useState('');
+  const [query, setQuery] = useState(() =>
+    pageParams(typeof window === 'undefined' ? '' : window.location.search),
+  );
+  const modules = useMemo(() => visibleModules(session), [session]);
+  useEffect(() => setSession(defaultSession()), []);
+  const saveSession = (next: Session) => {
+    window.localStorage.setItem('procurement.session', JSON.stringify(next));
+    setSession(next);
+  };
+  const loadRfqs = useCallback(
+    async (signal?: AbortSignal) => {
+      if (!session || !can(session, 'rfqs.read')) return;
+      setBusy(true);
+      setError(null);
+      try {
+        const params = new URLSearchParams();
+        Object.entries(query).forEach(([k, v]) => {
+          if (v) params.set(k, String(v));
+        });
+        window.history.replaceState(null, '', `?${params}`);
+        setRfqs(await api<PageResult>(`/rfqs?${params}`, session, undefined, signal));
+      } catch (e) {
+        setError(e as Error);
+      } finally {
+        setBusy(false);
       }
-      const path =
-        view === 'requests'
-          ? '/purchase-requests'
-          : view === 'approvals'
-            ? '/approvals/inbox'
-            : view === 'intake'
-              ? '/procurement-intake'
-              : view === 'suppliers'
-                ? '/suppliers'
-                : view === 'rfqs'
-                  ? '/rfqs'
-                  : view === 'invitations'
-                    ? '/supplier-portal/invitations'
-                    : '/approval-policies';
-      const params = new URLSearchParams();
-      Object.entries(query).forEach(([k, v]) => {
-        if (v) params.set(k, String(v));
-      });
-      const result = await api(`${path}?${params}`);
-      const normalized = Array.isArray(result)
-        ? { items: result, total: result.length, page: 1, limit: 25 }
-        : result;
-      setData(normalized as PageResult);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Request failed');
-    } finally {
-      setBusy(false);
-    }
-  }, [view, query]);
+    },
+    [query, session],
+  );
   useEffect(() => {
-    void load();
-  }, [load]);
-  async function open(row: Json) {
+    const c = new AbortController();
+    void loadRfqs(c.signal);
+    return () => c.abort();
+  }, [loadRfqs]);
+  async function openRfq(id: string) {
+    if (!session) return;
     setBusy(true);
-    setError('');
+    setError(null);
     try {
-      const id = text(row.id);
-      if (view === 'rfqs' || view === 'invitations') return;
-      const path =
-        view === 'requests'
-          ? `/purchase-requests/${id}`
-          : view === 'approvals'
-            ? `/approvals/${id}`
-            : view === 'intake'
-              ? `/procurement-intake/${id}`
-              : view === 'suppliers'
-                ? `/suppliers/${id}`
-                : `/approval-policies/${id}`;
-      setSelected(await api(path));
+      const rfq = await api<Rfq>(`/rfqs/${id}`, session);
+      setSelected(rfq);
+      setView('detail');
+      if (can(session, 'quotations.read'))
+        setQuotations(await api<PageResult>(`/rfqs/${id}/quotations`, session));
+      if (can(session, 'rfq_clarifications.manage'))
+        setClarifications(await api<Json[]>(`/rfqs/${id}/clarifications`, session));
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Unable to load detail');
+      setError(e as Error);
     } finally {
       setBusy(false);
     }
   }
+  async function loadSuppliers() {
+    if (!session || !can(session, 'suppliers.read')) return;
+    setBusy(true);
+    setError(null);
+    try {
+      setSuppliers(await api<PageResult>('/suppliers?limit=50', session));
+    } catch (e) {
+      setError(e as Error);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function createRfq(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!session) return;
+    const fd = new FormData(event.currentTarget);
+    const payload = {
+      title: text(fd.get('title')),
+      procurementCategory: text(fd.get('procurementCategory')),
+      currency: text(fd.get('currency')).toUpperCase(),
+      clarificationDeadline: text(fd.get('clarificationDeadline')),
+      submissionDeadline: text(fd.get('submissionDeadline')),
+      requiredBy: text(fd.get('requiredBy')),
+      deliveryLocation: text(fd.get('deliveryLocation')),
+    };
+    const errors = validateRfqDraft(payload);
+    if (Object.keys(errors).length) {
+      setError(new ApiError('validation', Object.values(errors).join(' ')));
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const rfq = await api<Rfq>('/rfqs', session, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      setSuccess('RFQ draft saved.');
+      await openRfq(rfq.id);
+    } catch (e) {
+      setError(e as Error);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function addLine(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!session || !selected) return;
+    const fd = new FormData(event.currentTarget);
+    const payload = {
+      description: text(fd.get('description')),
+      itemType: text(fd.get('itemType')) || 'goods',
+      quantity: text(fd.get('quantity')),
+      unitOfMeasure: text(fd.get('unitOfMeasure')),
+      specifications: text(fd.get('specifications')),
+      requiredBy: text(fd.get('requiredBy')),
+      deliveryLocation: text(fd.get('deliveryLocation')),
+      category: text(fd.get('category')),
+      lineSequence: Number(selected.lines?.length ?? 0) + 1,
+    };
+    setBusy(true);
+    setError(null);
+    try {
+      await api(`/rfqs/${selected.id}/lines`, session, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      setSuccess('RFQ line saved.');
+      await openRfq(selected.id);
+    } catch (e) {
+      setError(e as Error);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function invite(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!session || !selected) return;
+    const fd = new FormData(event.currentTarget);
+    const supplierId = text(fd.get('supplierId'));
+    const supplier = suppliers.items.find((s) => text(s.id) === supplierId);
+    const payload = {
+      supplierId,
+      supplierContactId: text(fd.get('supplierContactId')) || undefined,
+      expiresAt: text(fd.get('expiresAt')),
+    };
+    if (
+      text(supplier?.status) !== 'ACTIVE' ||
+      text(supplier?.qualification_status) !== 'APPROVED'
+    ) {
+      setError(
+        new ApiError(
+          'validation',
+          'Only active and approved suppliers can be invited. The backend will enforce final eligibility.',
+        ),
+      );
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await api(`/rfqs/${selected.id}/invitations`, session, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      setSuccess('Supplier invitation added.');
+      await openRfq(selected.id);
+    } catch (e) {
+      setError(e as Error);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function transition(to: RfqStatus) {
+    if (!session || !selected) return;
+    const key = idem();
+    if (!confirm(`Send RFQ workflow action ${selected.status} -> ${to}?`)) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api(`/rfqs/${selected.id}/transition`, session, {
+        method: 'POST',
+        body: JSON.stringify({ status: to, version: selected.version, idempotencyKey: key }),
+      });
+      setSuccess('RFQ status updated by the backend.');
+      await openRfq(selected.id);
+    } catch (e) {
+      setError(e as Error);
+    } finally {
+      setBusy(false);
+    }
+  }
+  if (!session) return <SessionForm onSave={saveSession} />;
+  const overview = rfqs.items.reduce<Record<string, Json[]>>((a, r) => {
+    const s = text(r.status);
+    (a[s] ??= []).push(r);
+    return a;
+  }, {});
   return (
-    <main className="shell">
+    <main className={`shell ${collapsed ? 'shell--collapsed' : ''}`}>
       <aside>
         <h1>Procurement Platform</h1>
-        <p>Operational purchasing</p>
-        <nav aria-label="Primary navigation">
-          <Nav
-            label="My Purchase Requests"
-            active={view === 'requests'}
-            onClick={() => {
-              setSelected(null);
-              setView('requests');
-            }}
-          />
-          <Nav
-            label="Create Purchase Request"
-            active={view === 'create'}
-            onClick={() => {
-              setSelected(null);
-              setView('create');
-            }}
-          />
-          <Nav
-            label="My Approval Inbox"
-            active={view === 'approvals'}
-            onClick={() => {
-              setSelected(null);
-              setView('approvals');
-            }}
-          />
-          <Nav
-            label="Procurement Intake Queue"
-            active={view === 'intake'}
-            onClick={() => {
-              setSelected(null);
-              setView('intake');
-            }}
-          />
-          <Nav
-            label="Supplier Management"
-            active={view === 'suppliers'}
-            onClick={() => {
-              setSelected(null);
-              setView('suppliers');
-            }}
-          />
-          <Nav
-            label="Request for Quotations"
-            active={view === 'rfqs'}
-            onClick={() => {
-              setSelected(null);
-              setView('rfqs');
-            }}
-          />
-          <Nav
-            label="My Supplier Invitations"
-            active={view === 'invitations'}
-            onClick={() => {
-              setSelected(null);
-              setView('invitations');
-            }}
-          />
-          <Nav
-            label="Approval Policies"
-            active={view === 'policies'}
-            onClick={() => {
-              setSelected(null);
-              setView('policies');
-            }}
-          />
+        <p>Internal sourcing workspace</p>
+        <Button onClick={() => setCollapsed(!collapsed)}>
+          {collapsed ? 'Expand' : 'Collapse'}
+        </Button>
+        <nav aria-label="Internal sourcing navigation">
+          {modules.map((m) => (
+            <button
+              className={`nav-item ${view === m.key ? 'active' : ''}`}
+              key={m.key}
+              onClick={() => {
+                setView(m.key as View);
+                if (m.key === 'suppliers') void loadSuppliers();
+              }}
+            >
+              {m.label}
+              <small>{m.permission}</small>
+            </button>
+          ))}
+          {can(session, 'rfqs.create') && (
+            <button
+              className={`nav-item ${view === 'new' ? 'active' : ''}`}
+              onClick={() => setView('new')}
+            >
+              Create RFQ draft<small>rfqs.create</small>
+            </button>
+          )}
         </nav>
         <small>
-          Supplier sourcing is available according to your persisted role and permissions.
+          Tenant {session.tenantId}
+          <br />
+          User {session.userId}
+          <br />
+          Role {session.role}
         </small>
       </aside>
       <section className="content">
         <header>
-          <p className="eyebrow">Procurement workspace</p>
-          <h2>
-            {selected
-              ? 'Record detail'
-              : view === 'requests'
-                ? 'My Purchase Requests'
-                : view === 'create'
-                  ? 'Create Purchase Request'
-                  : view === 'approvals'
-                    ? 'My Approval Inbox'
-                    : view === 'intake'
-                      ? 'Procurement Intake Queue'
-                      : view === 'suppliers'
-                        ? 'Supplier Management'
-                        : view === 'rfqs'
-                          ? 'Request for Quotations'
-                          : view === 'invitations'
-                            ? 'My Supplier Invitations'
-                            : 'Approval Policies'}
-          </h2>
+          <p className="eyebrow">Home / Internal sourcing / {view}</p>
+          <h2>Internal sourcing workspace</h2>
+          {success && (
+            <p className="success" role="status">
+              {success}
+            </p>
+          )}
         </header>
         {error && (
-          <div className="pp-state pp-state--error" role="alert">
-            <strong>Action required</strong>
-            <span>{error}</span>
-          </div>
-        )}
-        {busy && (
-          <div className="pp-state" aria-live="polite">
-            Loading current procurement data…
-          </div>
-        )}
-        {!busy && selected && (
-          <Detail
-            view={view}
-            record={selected}
-            close={() => setSelected(null)}
-            refresh={async () => {
-              setSelected(null);
-              await load();
-            }}
-            fail={setError}
+          <ErrorState
+            title={error instanceof ApiError ? error.kind.replace('_', ' ') : 'Request failed'}
+            description={error.message}
           />
         )}{' '}
-        {!busy && !selected && view === 'create' && (
-          <RequestForm
-            done={async () => {
-              setView('requests');
-              await load();
-            }}
-            fail={setError}
-          />
+        {busy && <LoadingState label="Loading real sourcing records" />}
+        {view === 'overview' && (
+          <section className="cards">
+            {[
+              'DRAFT',
+              'READY_FOR_REVIEW',
+              'CLARIFICATION_OPEN',
+              'QUOTATION_OPEN',
+              'QUOTATION_CLOSED',
+            ].map((s) => (
+              <article className="card" key={s}>
+                <h3>{s.replaceAll('_', ' ')}</h3>
+                <strong>{overview[s]?.length ?? 0}</strong>
+                {(overview[s] ?? []).slice(0, 5).map((r) => (
+                  <button
+                    key={text(r.id)}
+                    className="link"
+                    onClick={() => void openRfq(text(r.id))}
+                  >
+                    {text(r.rfq_number)} {text(r.title)}
+                  </button>
+                ))}
+                {!overview[s]?.length && <span>No real RFQs currently match this work queue.</span>}
+              </article>
+            ))}
+          </section>
+        )}
+        {view === 'rfqs' && (
+          <RfqList rfqs={rfqs} query={query} setQuery={setQuery} openRfq={openRfq} />
         )}{' '}
-        {!busy && !selected && view !== 'create' && (
-          <>
-            <Toolbar view={view} query={query} setQuery={setQuery} />
-            <Records view={view} data={data} open={open} />
-            <Pager data={data} setPage={(page) => setQuery((q) => ({ ...q, page }))} />
-            {view === 'policies' && <PolicyForm done={load} fail={setError} />}
-            {(view === 'suppliers' || view === 'rfqs') && (
-              <SourcingCreate view={view} done={load} fail={setError} />
-            )}
-          </>
+        {view === 'new' && <RfqForm onSubmit={createRfq} />}{' '}
+        {view === 'suppliers' && <SupplierList suppliers={suppliers} />}{' '}
+        {view === 'activity' && (
+          <EmptyState
+            title="Activity timeline"
+            description="Open an RFQ workspace to view persisted RFQ audit and activity sections exposed by the backend."
+          />
+        )}
+        {view === 'detail' && selected && (
+          <RfqWorkspace
+            rfq={selected}
+            quotations={quotations}
+            clarifications={clarifications}
+            suppliers={suppliers}
+            session={session}
+            addLine={addLine}
+            invite={invite}
+            loadSuppliers={loadSuppliers}
+            transition={transition}
+          />
         )}
       </section>
     </main>
   );
 }
-function Nav({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
+function SessionForm({ onSave }: { onSave: (s: Session) => void }) {
   return (
-    <button className={active ? 'nav-item active' : 'nav-item'} onClick={onClick}>
-      {label}
-    </button>
+    <main className="content">
+      <h1>Sign in to internal sourcing</h1>
+      <p>
+        Use authenticated development credentials mapped to persisted tenant membership and
+        permissions.
+      </p>
+      <form
+        className="request-form"
+        onSubmit={(e) => {
+          e.preventDefault();
+          const fd = new FormData(e.currentTarget);
+          onSave({
+            tenantId: text(fd.get('tenantId')),
+            userId: text(fd.get('userId')),
+            token: text(fd.get('userId')),
+            role: text(fd.get('role')) || 'Buyer',
+            permissions: text(fd.get('permissions'))
+              .split(',')
+              .map((p) => p.trim())
+              .filter(Boolean),
+          });
+        }}
+      >
+        <label>
+          Tenant ID
+          <Input name="tenantId" required />
+        </label>
+        <label>
+          User ID
+          <Input name="userId" required />
+        </label>
+        <label>
+          Current role
+          <Input name="role" defaultValue="Buyer" />
+        </label>
+        <label className="wide">
+          Persisted permissions
+          <Input
+            name="permissions"
+            defaultValue="rfqs.read,rfqs.create,rfqs.update_draft,rfqs.publish,rfq_invitations.manage,rfq_clarifications.manage,quotations.read,suppliers.read"
+          />
+        </label>
+        <Button>Continue</Button>
+      </form>
+    </main>
   );
 }
-function Toolbar({
-  view,
+function RfqList({
+  rfqs,
   query,
   setQuery,
+  openRfq,
 }: {
-  view: View;
-  query: {
-    search: string;
-    status: string;
-    sort: string;
-    direction: string;
-    page: number;
-    priority: string;
-    department: string;
-    category: string;
-    requiredFrom: string;
-    requiredTo: string;
-    requesterId: string;
-    buyerId: string;
-  };
-  setQuery: React.Dispatch<
-    React.SetStateAction<{
-      search: string;
-      status: string;
-      sort: string;
-      direction: string;
-      page: number;
-      priority: string;
-      department: string;
-      category: string;
-      requiredFrom: string;
-      requiredTo: string;
-      requesterId: string;
-      buyerId: string;
-    }>
-  >;
+  rfqs: PageResult;
+  query: ReturnType<typeof pageParams>;
+  setQuery: (q: ReturnType<typeof pageParams>) => void;
+  openRfq: (id: string) => Promise<void>;
 }) {
-  return (
-    <form className="toolbar" onSubmit={(e) => e.preventDefault()}>
-      <label>
-        Search
-        <input
-          className="pp-input"
-          value={query.search}
-          onChange={(e) => setQuery((q) => ({ ...q, search: e.target.value, page: 1 }))}
-        />
-      </label>
-      {view === 'intake' && (
-        <>
-          <label>
-            Priority
-            <select
-              className="pp-select"
-              onChange={(e) => setQuery((q) => ({ ...q, priority: e.target.value, page: 1 }))}
-            >
-              <option value="">All priorities</option>
-              <option>low</option>
-              <option>normal</option>
-              <option>high</option>
-              <option>urgent</option>
-            </select>
-          </label>
-          <label>
-            Department
-            <input
-              className="pp-input"
-              onChange={(e) => setQuery((q) => ({ ...q, department: e.target.value, page: 1 }))}
-            />
-          </label>
-          <label>
-            Category
-            <input
-              className="pp-input"
-              onChange={(e) => setQuery((q) => ({ ...q, category: e.target.value, page: 1 }))}
-            />
-          </label>
-          <label>
-            Required from
-            <input
-              className="pp-input"
-              type="date"
-              onChange={(e) => setQuery((q) => ({ ...q, requiredFrom: e.target.value, page: 1 }))}
-            />
-          </label>
-          <label>
-            Required to
-            <input
-              className="pp-input"
-              type="date"
-              onChange={(e) => setQuery((q) => ({ ...q, requiredTo: e.target.value, page: 1 }))}
-            />
-          </label>
-          <label>
-            Requester UUID
-            <input
-              className="pp-input"
-              onChange={(e) => setQuery((q) => ({ ...q, requesterId: e.target.value, page: 1 }))}
-            />
-          </label>
-          <label>
-            Buyer UUID
-            <input
-              className="pp-input"
-              onChange={(e) => setQuery((q) => ({ ...q, buyerId: e.target.value, page: 1 }))}
-            />
-          </label>
-        </>
-      )}
-      <label>
-        Status
-        <select
-          className="pp-select"
-          value={query.status}
-          onChange={(e) => setQuery((q) => ({ ...q, status: e.target.value, page: 1 }))}
-        >
-          <option value="">All statuses</option>
-          {(view === 'intake'
-            ? ['unassigned', 'assigned', 'in_review', 'closed']
-            : view === 'requests'
-              ? [
-                  'DRAFT',
-                  'PENDING_APPROVAL',
-                  'RETURNED_TO_REQUESTER',
-                  'REJECTED',
-                  'APPROVED',
-                  'WITHDRAWN',
-                  'CANCELLED',
-                  'IN_PROCUREMENT_REVIEW',
-                ]
-              : []
-          ).map((s) => (
-            <option key={s}>{s}</option>
-          ))}
-        </select>
-      </label>
-      <label>
-        Sort
-        <select
-          className="pp-select"
-          value={query.sort}
-          onChange={(e) => setQuery((q) => ({ ...q, sort: e.target.value }))}
-        >
-          {(view === 'intake'
-            ? ['receivedAt', 'requiredBy', 'estimatedTotal', 'priority']
-            : ['createdAt', 'requiredBy', 'estimatedTotal', 'requestNumber', 'priority']
-          ).map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
-          ))}
-        </select>
-      </label>
-      <button
-        className="secondary"
-        onClick={() =>
-          setQuery({
-            search: '',
-            status: '',
-            sort: view === 'intake' ? 'receivedAt' : 'createdAt',
-            direction: 'desc',
-            page: 1,
-            priority: '',
-            department: '',
-            category: '',
-            requiredFrom: '',
-            requiredTo: '',
-            requesterId: '',
-            buyerId: '',
-          })
-        }
-      >
-        Clear filters
-      </button>
-    </form>
-  );
-}
-function Records({ view, data, open }: { view: View; data: PageResult; open: (r: Json) => void }) {
-  if (!data.items.length)
-    return (
-      <section className="pp-state">
-        <strong>No matching operational records</strong>
-        <span>Adjust the filters or complete the preceding workflow step.</span>
-      </section>
-    );
-  return (
-    <div className="pp-table-wrapper">
-      <table className="pp-table">
-        <thead>
-          <tr>
-            {(view === 'approvals'
-              ? ['Step', 'Request', 'Created']
-              : view === 'intake'
-                ? ['Request', 'Status', 'Priority', 'Buyer', 'Aging']
-                : view === 'policies'
-                  ? ['Policy', 'Status', 'Priority', 'Version']
-                  : view === 'suppliers'
-                    ? ['Supplier', 'Legal name', 'Status', 'Qualification']
-                    : view === 'rfqs'
-                      ? ['RFQ', 'Title', 'Status', 'Deadline']
-                      : view === 'invitations'
-                        ? ['RFQ', 'Title', 'Status', 'Deadline']
-                        : ['Request', 'Title', 'Status', 'Value', 'Required by']
-            ).map((h) => (
-              <th key={h}>{h}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {data.items.map((r) => (
-            <tr
-              key={text(r.id)}
-              tabIndex={0}
-              onClick={() => void open(r)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') void open(r);
-              }}
-            >
-              {view === 'approvals' ? (
-                <>
-                  <td>{text(r.stepNumber)}</td>
-                  <td>{text((r.instance as Json)?.purchaseRequestId ?? r.instanceId)}</td>
-                  <td>{date(r.createdAt)}</td>
-                </>
-              ) : view === 'intake' ? (
-                <>
-                  <td>{text((r.purchaseRequest as Json)?.requestNumber)}</td>
-                  <td>{text(r.status)}</td>
-                  <td>{text((r.purchaseRequest as Json)?.priority)}</td>
-                  <td>{text(r.currentBuyerId) || 'Unassigned'}</td>
-                  <td>{text(r.agingDays)} days</td>
-                </>
-              ) : view === 'policies' ? (
-                <>
-                  <td>{text(r.name)}</td>
-                  <td>{r.active ? 'Active' : 'Inactive'}</td>
-                  <td>{text(r.priority)}</td>
-                  <td>{text(r.version)}</td>
-                </>
-              ) : view === 'suppliers' ? (
-                <>
-                  {' '}
-                  <td>{text(r.supplier_number ?? r.supplierNumber)}</td>
-                  <td>{text(r.legal_name ?? r.legalName)}</td>
-                  <td>{text(r.status)}</td>
-                  <td>{text(r.qualification_status ?? r.qualificationStatus)}</td>{' '}
-                </>
-              ) : view === 'rfqs' || view === 'invitations' ? (
-                <>
-                  {' '}
-                  <td>{text(r.rfq_number ?? r.rfqNumber)}</td>
-                  <td>{text(r.title)}</td>
-                  <td>{text(r.status)}</td>
-                  <td>{date(r.submission_deadline ?? r.submissionDeadline)}</td>{' '}
-                </>
-              ) : (
-                <>
-                  <td>{text(r.requestNumber)}</td>
-                  <td>{text(r.title)}</td>
-                  <td>{text(r.status)}</td>
-                  <td>
-                    {text(r.currency)} {text(r.estimatedTotal)}
-                  </td>
-                  <td>{date(r.requiredBy)}</td>
-                </>
-              )}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-function Pager({ data, setPage }: { data: PageResult; setPage: (p: number) => void }) {
-  const pages = Math.max(1, Math.ceil(data.total / data.limit));
-  return (
-    <div className="pager">
-      <span>
-        Page {data.page} of {pages} · {data.total} records
-      </span>
-      <button
-        className="secondary"
-        disabled={data.page <= 1}
-        onClick={() => setPage(data.page - 1)}
-      >
-        Previous
-      </button>
-      <button
-        className="secondary"
-        disabled={data.page >= pages}
-        onClick={() => setPage(data.page + 1)}
-      >
-        Next
-      </button>
-    </div>
-  );
-}
-function RequestForm({
-  record,
-  done,
-  fail,
-}: {
-  record?: Json;
-  done: () => Promise<void>;
-  fail: (s: string) => void;
-}) {
-  async function submit(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    const d = Object.fromEntries(
-      [...new FormData(e.currentTarget)].filter(([, value]) => value !== ''),
-    ) as Json;
-    if (record) d.version = record.version;
-    try {
-      await api(record ? `/purchase-requests/${text(record.id)}` : '/purchase-requests', {
-        method: record ? 'PATCH' : 'POST',
-        body: JSON.stringify(d),
-      });
-      await done();
-    } catch (x) {
-      fail(x instanceof Error ? x.message : 'Save failed');
-    }
-  }
-  return (
-    <form className="request-form" onSubmit={(e) => void submit(e)}>
-      {[
-        'title',
-        'legalEntity',
-        'department',
-        'costCenter',
-        'deliveryLocation',
-        'procurementCategory',
-      ].map((n) => (
-        <Field key={n} name={n} value={record?.[n]} required />
-      ))}
-      <Field name="businessJustification" value={record?.businessJustification} area required />
-      <Field name="currency" value={record?.currency ?? 'USD'} required />
-      <Field name="requiredBy" value={text(record?.requiredBy).slice(0, 10)} type="date" required />
-      <label>
-        Priority
-        <select
-          className="pp-select"
-          name="priority"
-          defaultValue={text(record?.priority) || 'normal'}
-        >
-          {['low', 'normal', 'high', 'urgent'].map((v) => (
-            <option key={v}>{v}</option>
-          ))}
-        </select>
-      </label>
-      <Field name="internalNotes" value={record?.internalNotes} area />
-      <div className="wide actions">
-        <button className="pp-button">{record ? 'Save draft' : 'Create draft'}</button>
-      </div>
-    </form>
-  );
-}
-function Field({
-  name,
-  value,
-  type = 'text',
-  area = false,
-  required = false,
-}: {
-  name: string;
-  value?: unknown;
-  type?: string;
-  area?: boolean;
-  required?: boolean;
-}) {
-  return (
-    <label className={area ? 'wide' : ''}>
-      {name.replaceAll(/([A-Z])/g, ' $1')}
-      {area ? (
-        <textarea className="pp-input" name={name} defaultValue={text(value)} required={required} />
-      ) : (
-        <input
-          className="pp-input"
-          name={name}
-          type={type}
-          defaultValue={text(value)}
-          required={required}
-        />
-      )}
-    </label>
-  );
-}
-function Detail({
-  view,
-  record,
-  close,
-  refresh,
-  fail,
-}: {
-  view: View;
-  record: Json;
-  close: () => void;
-  refresh: () => Promise<void>;
-  fail: (s: string) => void;
-}) {
-  async function action(path: string, payload: Json) {
-    try {
-      await api(path, { method: 'POST', body: JSON.stringify(payload) });
-      await refresh();
-    } catch (e) {
-      fail(e instanceof Error ? e.message : 'Action failed');
-    }
-  }
-  return (
-    <section className="detail">
-      <button className="secondary" onClick={close}>
-        ← Back to list
-      </button>
-      {view === 'requests' && (
-        <>
-          <h3>
-            {text(record.requestNumber)} · {text(record.title)}
-          </h3>
-          <dl>
-            <dt>Status</dt>
-            <dd>{text(record.status)}</dd>
-            <dt>Estimated total</dt>
-            <dd>
-              {text(record.currency)} {text(record.estimatedTotal)}
-            </dd>
-            <dt>Required by</dt>
-            <dd>{date(record.requiredBy)}</dd>
-          </dl>
-          {['DRAFT', 'RETURNED_TO_REQUESTER'].includes(text(record.status)) && (
-            <>
-              <RequestForm record={record} done={refresh} fail={fail} />
-              <ItemEditor request={record} refresh={refresh} fail={fail} />
-              <button
-                className="pp-button"
-                onClick={() =>
-                  void action(
-                    `/purchase-requests/${text(record.id)}/${text(record.status) === 'DRAFT' ? 'submit' : 'resubmit'}`,
-                    { version: record.version, idempotencyKey: key() },
-                  )
-                }
-              >
-                {text(record.status) === 'DRAFT' ? 'Submit' : 'Resubmit'}
-              </button>
-            </>
-          )}
-          {['PENDING_APPROVAL', 'RETURNED_TO_REQUESTER'].includes(text(record.status)) && (
-            <ReasonAction
-              label="Withdraw"
-              run={(reason) =>
-                action(`/purchase-requests/${text(record.id)}/withdraw`, {
-                  version: record.version,
-                  reason,
-                })
-              }
-            />
-          )}
-          <Timeline record={record} />
-        </>
-      )}
-      {view === 'approvals' && (
-        <>
-          <h3>Approval step {text(record.stepNumber)}</h3>
-          <RequestSummary record={((record.instance as Json)?.purchaseRequest as Json) ?? {}} />
-          <button
-            className="pp-button"
-            onClick={() =>
-              void action(`/approvals/${text(record.id)}/approve`, {
-                version: record.version,
-                idempotencyKey: key(),
-              })
-            }
-          >
-            Approve
-          </button>
-          <ReasonAction
-            label="Reject"
-            run={(comment) =>
-              action(`/approvals/${text(record.id)}/reject`, {
-                version: record.version,
-                idempotencyKey: key(),
-                comment,
-              })
-            }
-          />
-          <ReasonAction
-            label="Return to requester"
-            run={(comment) =>
-              action(`/approvals/${text(record.id)}/return`, {
-                version: record.version,
-                idempotencyKey: key(),
-                comment,
-              })
-            }
-          />
-        </>
-      )}
-      {view === 'intake' && (
-        <>
-          <h3>Procurement intake review</h3>
-          <RequestSummary record={(record.purchaseRequest as Json) ?? {}} />
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              const d = Object.fromEntries(
-                [...new FormData(e.currentTarget)].filter(([, value]) => value !== ''),
-              ) as Json;
-              void action(`/procurement-intake/${text(record.id)}/assign`, {
-                ...d,
-                version: record.version,
-                idempotencyKey: key(),
-              });
-            }}
-          >
-            <Field name="buyerId" required />
-            <Field name="reason" area required />
-            <button className="pp-button">
-              {record.currentBuyerId ? 'Reassign buyer' : 'Assign buyer'}
-            </button>
-          </form>
-        </>
-      )}
-      {view === 'policies' && <PolicyForm record={record} done={refresh} fail={fail} />}
-    </section>
-  );
-}
-function ItemEditor({
-  request,
-  refresh,
-  fail,
-}: {
-  request: Json;
-  refresh: () => Promise<void>;
-  fail: (s: string) => void;
-}) {
-  const items = (request.items as Json[]) ?? [];
-  async function save(e: FormEvent<HTMLFormElement>, item?: Json) {
-    e.preventDefault();
-    const d = Object.fromEntries(
-      [...new FormData(e.currentTarget)].filter(([, value]) => value !== ''),
-    ) as Json;
-    if (item) d.version = item.version;
-    else d.requestVersion = request.version;
-    try {
-      await api(`/purchase-requests/${text(request.id)}/items${item ? `/${text(item.id)}` : ''}`, {
-        method: item ? 'PATCH' : 'POST',
-        body: JSON.stringify(d),
-      });
-      await refresh();
-    } catch (x) {
-      fail(x instanceof Error ? x.message : 'Item save failed');
-    }
-  }
-  return (
-    <section>
-      <h3>Request items</h3>
-      {items.map((i) => (
-        <form className="item-row" key={text(i.id)} onSubmit={(e) => void save(e, i)}>
-          <ItemFields item={i} />
-          <button className="secondary">Save item</button>
-          <button
-            type="button"
-            className="danger"
-            onClick={() =>
-              void api(`/purchase-requests/${text(request.id)}/items/${text(i.id)}`, {
-                method: 'DELETE',
-                body: JSON.stringify({ version: i.version }),
-              })
-                .then(refresh)
-                .catch((x) => fail(x instanceof Error ? x.message : 'Delete failed'))
-            }
-          >
-            Remove
-          </button>
-        </form>
-      ))}
-      <form className="item-row" onSubmit={(e) => void save(e)}>
-        <ItemFields />
-        <button className="pp-button">Add item</button>
-      </form>
-    </section>
-  );
-}
-function ItemFields({ item }: { item?: Json }) {
   return (
     <>
-      <Field name="description" value={item?.description} required />
-      <label>
-        Item type
-        <select
-          name="itemType"
-          className="pp-select"
-          defaultValue={text(item?.itemType) || 'goods'}
+      <div className="toolbar">
+        <label>
+          Search
+          <Input
+            value={query.search}
+            onChange={(e) => setQuery({ ...query, search: e.target.value, page: 1 })}
+          />
+        </label>
+        <label>
+          Status
+          <Select
+            value={query.status}
+            onChange={(e) => setQuery({ ...query, status: e.target.value, page: 1 })}
+          >
+            <option value="">All statuses</option>
+            {[
+              'DRAFT',
+              'READY_FOR_REVIEW',
+              'PUBLISHED',
+              'CLARIFICATION_OPEN',
+              'QUOTATION_OPEN',
+              'QUOTATION_CLOSED',
+              'CANCELLED',
+              'CLOSED',
+            ].map((s) => (
+              <option key={s}>{s}</option>
+            ))}
+          </Select>
+        </label>
+        <label>
+          Category
+          <Input
+            value={query.category}
+            onChange={(e) => setQuery({ ...query, category: e.target.value, page: 1 })}
+          />
+        </label>
+        <label>
+          From
+          <Input
+            type="date"
+            value={query.from}
+            onChange={(e) => setQuery({ ...query, from: e.target.value, page: 1 })}
+          />
+        </label>
+        <label>
+          To
+          <Input
+            type="date"
+            value={query.to}
+            onChange={(e) => setQuery({ ...query, to: e.target.value, page: 1 })}
+          />
+        </label>
+      </div>
+      {rfqs.total === 0 ? (
+        <EmptyState
+          title="No real RFQs exist"
+          description="Create an RFQ draft or adjust filters."
+        />
+      ) : (
+        <Table>
+          <thead>
+            <tr>
+              <th>RFQ</th>
+              <th>Title</th>
+              <th>Status</th>
+              <th>Currency</th>
+              <th>Quotation deadline</th>
+              <th>Version</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rfqs.items.map((r) => (
+              <tr key={text(r.id)} tabIndex={0} onClick={() => void openRfq(text(r.id))}>
+                <td>{text(r.rfq_number)}</td>
+                <td>{text(r.title)}</td>
+                <td>
+                  <StatusBadge tone={statusTone(text(r.status))}>{text(r.status)}</StatusBadge>
+                </td>
+                <td>{text(r.currency)}</td>
+                <td>{date(r.submission_deadline)}</td>
+                <td>{text(r.version)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </Table>
+      )}
+      <div className="pager">
+        <Button
+          disabled={query.page <= 1}
+          onClick={() => setQuery({ ...query, page: query.page - 1 })}
         >
-          <option>goods</option>
-          <option>services</option>
-        </select>
-      </label>
-      {[
-        'quantity',
-        'unitOfMeasure',
-        'estimatedUnitPrice',
-        'category',
-        'specifications',
-        'deliveryLocation',
-      ].map((n) => (
-        <Field key={n} name={n} value={item?.[n]} required />
-      ))}
-      <Field name="requiredBy" value={text(item?.requiredBy).slice(0, 10)} type="date" required />
-      <Field name="suggestedSupplierName" value={item?.suggestedSupplierName} />
+          Previous
+        </Button>
+        <span>
+          Page {rfqs.page} of {Math.max(1, Math.ceil(rfqs.total / rfqs.limit))}. Total {rfqs.total}.
+        </span>
+        <Button
+          disabled={rfqs.page * rfqs.limit >= rfqs.total}
+          onClick={() => setQuery({ ...query, page: query.page + 1 })}
+        >
+          Next
+        </Button>
+      </div>
     </>
   );
 }
-function ReasonAction({ label, run }: { label: string; run: (r: string) => Promise<unknown> }) {
+function RfqForm({ onSubmit }: { onSubmit: (e: FormEvent<HTMLFormElement>) => void }) {
   return (
-    <form
-      className="inline-action"
-      onSubmit={(e) => {
-        e.preventDefault();
-        void run(text(new FormData(e.currentTarget).get('reason')));
-      }}
-    >
+    <form className="request-form" onSubmit={onSubmit}>
       <label>
-        {label} reason
-        <textarea className="pp-input" name="reason" required />
+        Title
+        <Input name="title" required maxLength={250} />
       </label>
-      <button className={label === 'Reject' ? 'danger' : 'secondary'}>{label}</button>
-    </form>
-  );
-}
-function RequestSummary({ record }: { record: Json }) {
-  return (
-    <dl>
-      <dt>Request</dt>
-      <dd>
-        {text(record.requestNumber)} · {text(record.title)}
-      </dd>
-      <dt>Requester</dt>
-      <dd>{text(record.requesterId)}</dd>
-      <dt>Value</dt>
-      <dd>
-        {text(record.currency)} {text(record.estimatedTotal)}
-      </dd>
-      <dt>Priority</dt>
-      <dd>{text(record.priority)}</dd>
-    </dl>
-  );
-}
-function Timeline({ record }: { record: Json }) {
-  const events = (record.activity as Json[]) ?? [];
-  const instances = (record.approvals as Json[]) ?? [];
-  return (
-    <section>
-      <h3>Approval timeline and activity</h3>
-      {!events.length && !instances.length ? (
-        <p>No lifecycle activity has been recorded.</p>
-      ) : (
-        <ol className="timeline">
-          {events.map((e) => (
-            <li key={text(e.id)}>
-              <strong>{text(e.action)}</strong>
-              <span>{date(e.createdAt)}</span>
-            </li>
-          ))}
-        </ol>
-      )}
-    </section>
-  );
-}
-function PolicyForm({
-  record,
-  done,
-  fail,
-}: {
-  record?: Json;
-  done: () => Promise<void>;
-  fail: (s: string) => void;
-}) {
-  const initial = (record?.steps as Json[]) ?? [
-    { stepNumber: 1, requiredPermission: 'approvals.act' },
-  ];
-  const [steps, setSteps] = useState<Json[]>(initial);
-  async function save(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    const d = Object.fromEntries(
-      [...new FormData(e.currentTarget)].filter(([, value]) => value !== ''),
-    ) as Json;
-    d.priority = Number(d.priority);
-    d.steps = steps.map((s, i) => ({
-      ...s,
-      stepNumber: i + 1,
-      escalationAfterHours: s.escalationAfterHours ? Number(s.escalationAfterHours) : undefined,
-    }));
-    if (record) d.version = record.version;
-    try {
-      await api(record ? `/approval-policies/${text(record.id)}` : '/approval-policies', {
-        method: record ? 'PATCH' : 'POST',
-        body: JSON.stringify(d),
-      });
-      await done();
-    } catch (x) {
-      fail(x instanceof Error ? x.message : 'Policy save failed');
-    }
-  }
-  return (
-    <form className="policy-form" onSubmit={(e) => void save(e)}>
-      <h3>{record ? 'Edit approval policy' : 'Create approval policy'}</h3>
-      <Field name="name" value={record?.name} required />
-      <Field name="priority" value={record?.priority ?? 100} type="number" required />
-      <Field name="minAmount" value={record?.minAmount} />
-      <Field name="maxAmount" value={record?.maxAmount} />
-      <Field name="department" value={record?.department} />
-      <Field name="legalEntity" value={record?.legalEntity} />
-      <Field name="procurementCategory" value={record?.procurementCategory} />
-      <Field name="currency" value={record?.currency} />
       <label>
-        Request priority
-        <select
-          className="pp-select"
-          name="requestPriority"
-          defaultValue={text(record?.requestPriority)}
-        >
-          <option value="">Any priority</option>
-          <option>low</option>
-          <option>normal</option>
-          <option>high</option>
-          <option>urgent</option>
-        </select>
+        Procurement category
+        <Input name="procurementCategory" required maxLength={150} />
       </label>
-      {steps.map((s, i) => (
-        <fieldset key={i}>
-          <legend>Step {i + 1}</legend>
-          <label>
-            Approver user or role UUID
-            <input
-              className="pp-input"
-              value={text(s.approverUserId ?? s.approverRoleId)}
-              onChange={(e) =>
-                setSteps((a) =>
-                  a.map((v, x) =>
-                    x === i
-                      ? v.approverRoleId
-                        ? { ...v, approverRoleId: e.target.value }
-                        : { ...v, approverUserId: e.target.value }
-                      : v,
-                  ),
-                )
-              }
-              required
-            />
-          </label>
-          <label>
-            Assignment type
-            <select
-              className="pp-select"
-              value={s.approverRoleId ? 'role' : 'user'}
-              onChange={(e) =>
-                setSteps((a) =>
-                  a.map((v, x) =>
-                    x === i
-                      ? {
-                          ...v,
-                          approverRoleId:
-                            e.target.value === 'role' ? text(v.approverUserId) : undefined,
-                          approverUserId:
-                            e.target.value === 'user' ? text(v.approverRoleId) : undefined,
-                        }
-                      : v,
-                  ),
-                )
-              }
-            >
-              <option value="user">Named user</option>
-              <option value="role">Tenant role</option>
-            </select>
-          </label>
-          <label>
-            Required permission
-            <input
-              className="pp-input"
-              value={text(s.requiredPermission)}
-              onChange={(e) =>
-                setSteps((a) =>
-                  a.map((v, x) => (x === i ? { ...v, requiredPermission: e.target.value } : v)),
-                )
-              }
-              required
-            />
-          </label>
-          <label>
-            Minimum threshold
-            <input
-              className="pp-input"
-              value={text(s.minThreshold)}
-              onChange={(e) =>
-                setSteps((a) =>
-                  a.map((v, x) =>
-                    x === i ? { ...v, minThreshold: e.target.value || undefined } : v,
-                  ),
-                )
-              }
-            />
-          </label>
-          <label>
-            Maximum threshold
-            <input
-              className="pp-input"
-              value={text(s.maxThreshold)}
-              onChange={(e) =>
-                setSteps((a) =>
-                  a.map((v, x) =>
-                    x === i ? { ...v, maxThreshold: e.target.value || undefined } : v,
-                  ),
-                )
-              }
-            />
-          </label>
-          <label>
-            Escalation after hours
-            <input
-              className="pp-input"
-              type="number"
-              min="1"
-              value={text(s.escalationAfterHours)}
-              onChange={(e) =>
-                setSteps((a) =>
-                  a.map((v, x) =>
-                    x === i ? { ...v, escalationAfterHours: e.target.value || undefined } : v,
-                  ),
-                )
-              }
-            />
-          </label>
-          <button
-            type="button"
-            className="secondary"
-            disabled={i === 0}
-            onClick={() =>
-              setSteps((a) => {
-                const n = [...a];
-                const previous = n[i - 1]!;
-                n[i - 1] = n[i]!;
-                n[i] = previous;
-                return n;
-              })
-            }
-          >
-            Move up
-          </button>
-          <button
-            type="button"
-            className="danger"
-            disabled={steps.length === 1}
-            onClick={() => setSteps((a) => a.filter((_, x) => x !== i))}
-          >
-            Remove step
-          </button>
-        </fieldset>
-      ))}
-      <button
-        type="button"
-        className="secondary"
-        onClick={() =>
-          setSteps((a) => [...a, { stepNumber: a.length + 1, requiredPermission: 'approvals.act' }])
-        }
-      >
-        Add approval step
-      </button>
-      <button className="pp-button">Save policy</button>
-      {record && (
-        <button
-          type="button"
-          className="secondary"
-          onClick={() =>
-            void api(`/approval-policies/${text(record.id)}/status`, {
-              method: 'POST',
-              body: JSON.stringify({ version: record.version, active: !record.active }),
-            })
-              .then(done)
-              .catch((x) => fail(x instanceof Error ? x.message : 'Status change failed'))
-          }
-        >
-          {record.active ? 'Deactivate' : 'Activate'}
-        </button>
-      )}
+      <label>
+        Currency
+        <Input name="currency" required defaultValue="USD" maxLength={3} />
+      </label>
+      <label>
+        Clarification deadline
+        <Input name="clarificationDeadline" type="datetime-local" required />
+      </label>
+      <label>
+        Quotation deadline
+        <Input name="submissionDeadline" type="datetime-local" required />
+      </label>
+      <label>
+        Required by
+        <Input name="requiredBy" type="date" required />
+      </label>
+      <label className="wide">
+        Delivery location
+        <Input name="deliveryLocation" required maxLength={500} />
+      </label>
+      <Button>Save RFQ draft</Button>
     </form>
   );
 }
-function date(v: unknown) {
-  return v ? new Date(String(v)).toLocaleDateString('en') : '';
+function SupplierList({ suppliers }: { suppliers: PageResult }) {
+  return suppliers.total === 0 ? (
+    <EmptyState
+      title="No real suppliers exist"
+      description="No persisted suppliers were returned by the API."
+    />
+  ) : (
+    <Table>
+      <thead>
+        <tr>
+          <th>Supplier</th>
+          <th>Status</th>
+          <th>Qualification</th>
+          <th>Country</th>
+          <th>Currency</th>
+        </tr>
+      </thead>
+      <tbody>
+        {suppliers.items.map((s) => (
+          <tr key={text(s.id)}>
+            <td>{text(s.legal_name)}</td>
+            <td>{text(s.status)}</td>
+            <td>{text(s.qualification_status)}</td>
+            <td>{text(s.country)}</td>
+            <td>{text(s.default_currency)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </Table>
+  );
 }
-
-function SourcingCreate({
-  view,
-  done,
-  fail,
+function RfqWorkspace({
+  rfq,
+  quotations,
+  clarifications,
+  suppliers,
+  session,
+  addLine,
+  invite,
+  loadSuppliers,
+  transition,
 }: {
-  view: 'suppliers' | 'rfqs';
-  done: () => Promise<void>;
-  fail: (message: string) => void;
+  rfq: Rfq;
+  quotations: PageResult;
+  clarifications: Json[];
+  suppliers: PageResult;
+  session: Session;
+  addLine: (e: FormEvent<HTMLFormElement>) => void;
+  invite: (e: FormEvent<HTMLFormElement>) => void;
+  loadSuppliers: () => Promise<void>;
+  transition: (to: RfqStatus) => Promise<void>;
 }) {
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const body = Object.fromEntries(
-      [...new FormData(event.currentTarget)].filter(([, value]) => value !== ''),
-    );
-    try {
-      await api(view === 'suppliers' ? '/suppliers' : '/rfqs', {
-        method: 'POST',
-        body: JSON.stringify(body),
-      });
-      event.currentTarget.reset();
-      await done();
-    } catch (error) {
-      fail(error instanceof Error ? error.message : 'Unable to save sourcing record');
-    }
-  }
   return (
-    <form
-      className="request-form"
-      onSubmit={(event) => void submit(event)}
-      aria-label={view === 'suppliers' ? 'Create supplier' : 'Create RFQ draft'}
-    >
-      <h3 className="wide">{view === 'suppliers' ? 'Create supplier' : 'Create RFQ draft'}</h3>
-      {view === 'suppliers' ? (
-        <>
-          <Field name="legalName" required />
-          <Field name="tradingName" />
-          <Field name="supplierType" required />
-          <Field name="country" required />
-          <Field name="defaultCurrency" required />
-          <Field name="primaryEmail" type="email" />
-          <Field name="primaryPhone" />
-        </>
-      ) : (
-        <>
-          <Field name="title" required />
-          <Field name="procurementCategory" required />
-          <Field name="currency" required />
-          <Field name="clarificationDeadline" type="datetime-local" required />
-          <Field name="submissionDeadline" type="datetime-local" required />
-          <Field name="requiredBy" type="date" required />
-          <Field name="deliveryLocation" required />
-        </>
-      )}
-      <button className="pp-button wide">
-        {view === 'suppliers' ? 'Create supplier' : 'Create RFQ draft'}
-      </button>
-    </form>
+    <div className="detail">
+      <h3>
+        {text(rfq.rfq_number)} — {text(rfq.title)}
+      </h3>
+      <dl>
+        <dt>Status</dt>
+        <dd>
+          <StatusBadge tone={statusTone(rfq.status)}>{rfq.status}</StatusBadge>
+        </dd>
+        <dt>Currency</dt>
+        <dd>{text(rfq.currency)}</dd>
+        <dt>Version</dt>
+        <dd>{rfq.version}</dd>
+        <dt>Clarification deadline</dt>
+        <dd>{date(rfq.clarification_deadline)}</dd>
+        <dt>Quotation deadline</dt>
+        <dd>{date(rfq.submission_deadline)}</dd>
+        <dt>Created</dt>
+        <dd>{date(rfq.created_at)}</dd>
+        <dt>Updated</dt>
+        <dd>{date(rfq.updated_at)}</dd>
+      </dl>
+      <section>
+        <h3>State actions</h3>
+        {validTransitionActions(rfq.status, session).map((s) => (
+          <Button key={s} onClick={() => void transition(s)}>
+            {rfq.status} → {s}
+          </Button>
+        ))}
+        {can(session, 'rfqs.cancel') && !['CANCELLED', 'CLOSED'].includes(rfq.status) && (
+          <span> Cancellation is supported by POST /rfqs/:id/cancel with a reason.</span>
+        )}
+      </section>
+      <section>
+        <h3>Lines</h3>
+        {!rfq.lines?.length ? (
+          <EmptyState
+            title="No RFQ lines exist"
+            description="No persisted RFQ lines were returned."
+          />
+        ) : (
+          <Table>
+            <tbody>
+              {rfq.lines.map((l) => (
+                <tr key={text(l.id)}>
+                  <td>{text(l.line_sequence)}</td>
+                  <td>{text(l.description)}</td>
+                  <td>
+                    {text(l.quantity)} {text(l.unit_of_measure)}
+                  </td>
+                  <td>{text(l.category)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+        )}
+        {can(session, 'rfqs.update_draft') && rfq.status === 'DRAFT' && (
+          <form className="item-row" onSubmit={addLine}>
+            <label>
+              Description
+              <Input name="description" required />
+            </label>
+            <label>
+              Type
+              <Select name="itemType">
+                <option value="goods">Goods</option>
+                <option value="services">Services</option>
+              </Select>
+            </label>
+            <label>
+              Quantity
+              <Input name="quantity" required defaultValue="1" />
+            </label>
+            <label>
+              Unit
+              <Input name="unitOfMeasure" required />
+            </label>
+            <label>
+              Category
+              <Input name="category" required />
+            </label>
+            <label>
+              Required by
+              <Input type="date" name="requiredBy" required />
+            </label>
+            <label>
+              Delivery location
+              <Input name="deliveryLocation" required />
+            </label>
+            <label>
+              Specifications
+              <Input name="specifications" required />
+            </label>
+            <Button>Add real RFQ line</Button>
+          </form>
+        )}
+      </section>
+      <section>
+        <h3>Suppliers and invitations</h3>
+        <Button onClick={() => void loadSuppliers()}>Load eligible supplier records</Button>
+        {!rfq.invitations?.length ? (
+          <EmptyState
+            title="No invitations exist"
+            description="No persisted RFQ invitations were returned."
+          />
+        ) : (
+          <Table>
+            <tbody>
+              {rfq.invitations.map((i) => (
+                <tr key={text(i.id)}>
+                  <td>{text(i.supplier_id)}</td>
+                  <td>{text(i.status)}</td>
+                  <td>{date(i.sent_at)}</td>
+                  <td>{date(i.expires_at)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+        )}
+        {can(session, 'rfq_invitations.manage') &&
+          ['DRAFT', 'READY_FOR_REVIEW'].includes(rfq.status) && (
+            <form className="item-row" onSubmit={invite}>
+              <label>
+                Supplier
+                <Select name="supplierId" required>
+                  {suppliers.items.map((s) => (
+                    <option key={text(s.id)} value={text(s.id)}>
+                      {text(s.legal_name)} — {text(s.status)} / {text(s.qualification_status)}
+                    </option>
+                  ))}
+                </Select>
+              </label>
+              <label>
+                Supplier contact ID
+                <Input name="supplierContactId" />
+              </label>
+              <label>
+                Expires at
+                <Input type="datetime-local" name="expiresAt" required />
+              </label>
+              <Button>Add invitation</Button>
+            </form>
+          )}
+      </section>
+      <section>
+        <h3>Clarifications</h3>
+        {clarifications.length === 0 ? (
+          <EmptyState
+            title="No clarification threads exist"
+            description="No persisted public or private clarification records were returned."
+          />
+        ) : (
+          clarifications.map((c) => (
+            <article className="card" key={text(c.id)}>
+              <strong>
+                {text(c.subject)} — {text(c.visibility)}
+              </strong>
+              <pre>{JSON.stringify(c.messages, null, 2)}</pre>
+            </article>
+          ))
+        )}
+      </section>
+      <section>
+        <h3>Quotations</h3>
+        {quotations.total === 0 ? (
+          <EmptyState
+            title="No submitted quotations exist"
+            description="No persisted non-draft quotations were returned."
+          />
+        ) : (
+          <Table>
+            <tbody>
+              {quotations.items.map((q) => (
+                <tr key={text(q.id)}>
+                  <td>{text(q.quotation_number)}</td>
+                  <td>{text(q.supplier_id)}</td>
+                  <td>{text(q.status)}</td>
+                  <td>{text(q.currency)}</td>
+                  <td>{date(q.submitted_at)}</td>
+                  <td>{text(q.current_revision)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+        )}
+      </section>
+      <section>
+        <h3>Files, terms, activity and audit</h3>
+        <p>
+          Files and terms are shown only when fields are returned by the RFQ detail API.
+          Audit-sensitive changes are read from persisted backend records and never generated in the
+          browser.
+        </p>
+      </section>
+    </div>
   );
 }
