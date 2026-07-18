@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
 import {
   Button,
@@ -44,11 +44,6 @@ import type {
   Supplier,
 } from '../../../lib/types';
 const text = (v: unknown) => (v == null ? '' : String(v));
-const idStore = new IdempotencyStore();
-function commandPayload(base: Record<string, unknown>, operation: string) {
-  const key = idStore.keyFor(operation, base);
-  return { ...base, idempotencyKey: key };
-}
 export default function RfqDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { can, session } = useSession();
@@ -60,6 +55,8 @@ export default function RfqDetailPage() {
   const [selectedSupplier, setSelectedSupplier] = useState<Supplier | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
   const [busy, setBusy] = useState(true);
+  const [mutationBusy, setMutationBusy] = useState(false);
+  const idStore = useRef(new IdempotencyStore());
   const refresh = async () => {
     const r = await getRfq(id);
     setRfq(r);
@@ -87,16 +84,22 @@ export default function RfqDetailPage() {
     operation: string,
     payload: Record<string, unknown>,
     fn: (body: unknown) => Promise<unknown>,
+    idempotent = true,
   ) {
-    if (!idStore.start(operation)) return;
+    if (mutationBusy) return;
+    const prepared = idempotent ? idStore.current.prepare(operation, payload) : null;
+    if (idempotent && !prepared) return;
+    setMutationBusy(true);
     setError(null);
     try {
-      await fn(commandPayload(payload, operation));
-      idStore.finish(operation, true);
+      await fn(idempotent ? { ...payload, idempotencyKey: prepared!.key } : payload);
+      if (idempotent) idStore.current.finish(operation, true);
       await refresh();
     } catch (e) {
-      idStore.finish(operation, false);
+      if (idempotent) idStore.current.finish(operation, false);
       if (e instanceof ApiError) setError(e);
+    } finally {
+      setMutationBusy(false);
     }
   }
   if (busy) return <LoadingState label="Loading persisted RFQ workspace" />;
@@ -132,8 +135,12 @@ export default function RfqDetailPage() {
         <HeaderForm
           rfq={rfq}
           onSave={async (body) => {
-            await updateRfq(rfq.id, { ...body, version: rfq.version });
-            await refresh();
+            await mutate(
+              'header:update',
+              { ...(body as Record<string, unknown>), version: rfq.version },
+              (payload) => updateRfq(rfq.id, payload),
+              false,
+            );
           }}
         />
       )}
@@ -142,6 +149,7 @@ export default function RfqDetailPage() {
         {actions.map((to) => (
           <Button
             key={to}
+            disabled={mutationBusy}
             onClick={() =>
               void mutate(
                 `transition:${rfq.id}:${to}`,
@@ -190,37 +198,54 @@ export default function RfqDetailPage() {
       <Lines
         rfq={rfq}
         canEdit={can('rfqs.update_draft') && rfq.status === 'DRAFT'}
-        refresh={refresh}
+        mutate={mutate}
+        mutationBusy={mutationBusy}
       />
       <section>
         <h3>Suppliers and invitations</h3>
         <div className="toolbar">
-          <Button
-            onClick={async () => setSuppliers(await listSuppliers(new URLSearchParams('limit=20')))}
-          >
-            Load eligible suppliers
-          </Button>
+          {can('rfq_invitations.manage') && (
+            <Button
+              onClick={async () =>
+                setSuppliers(await listSuppliers(new URLSearchParams('limit=20')))
+              }
+            >
+              Search suppliers
+            </Button>
+          )}
         </div>
-        {suppliers && (
+        {can('rfq_invitations.manage') && suppliers && (
           <form
             className="item-row"
             onSubmit={async (e) => {
               e.preventDefault();
               const fd = new FormData(e.currentTarget);
-              await inviteSupplier(rfq.id, {
-                supplierId: text(fd.get('supplierId')),
-                supplierContactId: text(fd.get('supplierContactId')) || undefined,
-                expiresAt: text(fd.get('expiresAt')),
-              });
-              await refresh();
+              const supplierId = text(fd.get('supplierId'));
+              if (!supplierId) return;
+              await mutate(
+                'invitation:create',
+                {
+                  supplierId,
+                  supplierContactId: text(fd.get('supplierContactId')) || undefined,
+                  expiresAt: text(fd.get('expiresAt')),
+                },
+                (payload) => inviteSupplier(rfq.id, payload),
+                false,
+              );
             }}
           >
             <label>
               Supplier
               <Select
                 name="supplierId"
-                onChange={async (e) => setSelectedSupplier(await getSupplier(e.target.value))}
+                defaultValue=""
+                required
+                onChange={async (e) => {
+                  setSelectedSupplier(null);
+                  if (e.target.value) setSelectedSupplier(await getSupplier(e.target.value));
+                }}
               >
+                <option value="">Select supplier</option>
                 {suppliers.items.map((s) => (
                   <option key={s.id} value={s.id}>
                     {s.legal_name} — {s.status}/{s.qualification_status}
@@ -228,15 +253,7 @@ export default function RfqDetailPage() {
                 ))}
               </Select>
             </label>
-            <Button
-              type="button"
-              onClick={async () => {
-                const sid = suppliers.items[0]?.id;
-                if (sid) setSelectedSupplier(await getSupplier(sid));
-              }}
-            >
-              Load contacts
-            </Button>
+
             <label>
               Contact
               <Select name="supplierContactId">
@@ -365,11 +382,18 @@ function HeaderForm({
 function Lines({
   rfq,
   canEdit,
-  refresh,
+  mutate,
+  mutationBusy,
 }: {
   rfq: RfqDetail;
   canEdit: boolean;
-  refresh: () => Promise<void>;
+  mutate: (
+    operation: string,
+    payload: Record<string, unknown>,
+    fn: (body: unknown) => Promise<unknown>,
+    idempotent?: boolean,
+  ) => Promise<void>;
+  mutationBusy: boolean;
 }) {
   const blank = {
     description: '',
@@ -399,9 +423,14 @@ function Lines({
           lineSequence: Number(fd.get('lineSequence')),
           version: line?.version,
         };
-        if (line) await updateLine(rfq.id, line.id, body);
-        else await addLine(rfq.id, body);
-        await refresh();
+        if (line)
+          await mutate(
+            `line:update:${line.id}`,
+            body,
+            (payload) => updateLine(rfq.id, line.id, payload),
+            false,
+          );
+        else await mutate('line:create', body, (payload) => addLine(rfq.id, payload), false);
       }}
     >
       <label>
@@ -454,11 +483,18 @@ function Lines({
           defaultValue={line?.line_sequence ?? rfq.lines.length + 1}
         />
       </label>
-      <Button>{line ? 'Save line' : 'Add line'}</Button>
+      <Button disabled={mutationBusy}>{line ? 'Save line' : 'Add line'}</Button>
       {line && (
         <Button
           type="button"
-          onClick={() => void deleteLine(rfq.id, line.id, line.version).then(refresh)}
+          onClick={() =>
+            void mutate(
+              `line:delete:${line.id}`,
+              { version: line.version },
+              () => deleteLine(rfq.id, line.id, line.version),
+              false,
+            )
+          }
         >
           Delete line
         </Button>
@@ -560,6 +596,7 @@ function Clarifications({
     o: string,
     p: Record<string, unknown>,
     f: (b: unknown) => Promise<unknown>,
+    idempotent?: boolean,
   ) => Promise<void>;
   refresh: () => Promise<void>;
 }) {
@@ -586,10 +623,12 @@ function Clarifications({
                 onSubmit={(e) => {
                   e.preventDefault();
                   const fd = new FormData(e.currentTarget);
-                  void answerClarification(t.id, {
-                    body: text(fd.get('body')),
-                    visibility: text(fd.get('visibility')),
-                  });
+                  void mutate(
+                    `clarification-response:${t.id}`,
+                    { body: text(fd.get('body')), visibility: text(fd.get('visibility')) },
+                    (body) => answerClarification(t.id, body),
+                    false,
+                  );
                 }}
               >
                 <label>

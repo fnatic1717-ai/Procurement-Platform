@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { IdempotencyStore } from './idempotency';
+import { canonicalize, IdempotencyStore } from './idempotency';
 import { normalizeError } from './api';
 import { validateRfqDraft } from './validation';
 
@@ -18,22 +18,24 @@ describe('Phase 2C-1 frontend safeguards', () => {
     expect(errors.currency).toBeDefined();
     expect(errors.submissionDeadline).toContain('after');
   });
-  it('reuses an idempotency key for unchanged payload until success', () => {
+  it('canonicalizes nested payloads independent of object key order', () => {
+    expect(canonicalize({ z: [{ b: 2, a: 1 }], a: 'x' })).toBe(
+      canonicalize({ a: 'x', z: [{ a: 1, b: 2 }] }),
+    );
+  });
+  it('atomically prepares, starts and reuses an idempotency key for unchanged failed payloads', () => {
     vi.stubGlobal('crypto', {
       randomUUID: vi.fn().mockReturnValueOnce('k1').mockReturnValueOnce('k2'),
     });
     const store = new IdempotencyStore();
-    expect(store.keyFor('transition', { version: 1, status: 'PUBLISHED' })).toBe('k1');
-    expect(store.keyFor('transition', { status: 'PUBLISHED', version: 1 })).toBe('k1');
+    const first = store.prepare('transition', { version: 1, status: 'PUBLISHED' });
+    expect(first?.key).toBe('k1');
+    expect(store.prepare('transition', { status: 'PUBLISHED', version: 1 })).toBeNull();
+    store.finish('transition', false);
+    expect(store.prepare('transition', { status: 'PUBLISHED', version: 1 })?.key).toBe('k1');
     store.finish('transition', true);
-    expect(store.keyFor('transition', { version: 1, status: 'PUBLISHED' })).toBe('k2');
+    expect(store.prepare('transition', { version: 1, status: 'PUBLISHED' })?.key).toBe('k2');
     vi.unstubAllGlobals();
-  });
-  it('prevents repeated button clicks while a mutation is processing', () => {
-    const store = new IdempotencyStore();
-    store.keyFor('cancel', { version: 1, reason: 'duplicate' });
-    expect(store.start('cancel')).toBe(true);
-    expect(store.start('cancel')).toBe(false);
   });
   it('normalizes session expiry, forbidden and stale-version conflicts', () => {
     expect(normalizeError(401, {}).kind).toBe('unauthorized');

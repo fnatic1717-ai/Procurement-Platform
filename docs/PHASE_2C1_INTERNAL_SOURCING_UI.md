@@ -14,18 +14,19 @@ The root route redirects to `/sourcing`.
 
 ## Authenticated session flow
 
-The browser no longer controls tenant ID, user ID, role, permissions, or development bearer identity. The web app loads `GET /api/v1/auth/session` using `credentials: include`. The API derives session identity, active tenant membership, actor type, role label, and permissions from the authenticated backend principal.
+The browser no longer controls tenant ID, user ID, role, permissions, or development bearer identity. The web app loads `GET /api/v1/auth/session` using `credentials: include`. Sessions are established by `POST /api/v1/auth/login`, which authenticates through the configured `AuthProvider`, verifies the selected tenant against persisted active memberships, and issues a signed HTTP-only `procurement_session` cookie. The API derives session identity, active tenant membership, actor type, persisted role display, and permissions from the authenticated backend principal.
 
 Supported authentication inputs are backend-controlled:
 
-- Production: signed `procurement_session` HTTP-only cookie verified with `PROCUREMENT_SESSION_SECRET`.
-- Development/test: existing development bearer authentication may still be used by API tests and non-production tooling, but permissions are still loaded by the backend principal loader from persisted membership/registered fixtures. The web UI does not expose editable fields for bearer identity, tenant, role, or permissions.
+- Production: signed `procurement_session` HTTP-only cookie verified with `PROCUREMENT_SESSION_SECRET`, explicit issue/expiry claims, active membership ID validation, `httpOnly`, production `secure`, `sameSite=lax`, and bounded max age.
+- Development/test: explicit development login is available only when `ENABLE_DEVELOPMENT_LOGIN=true` and `NODE_ENV` is not `production`; permissions are still loaded by the backend principal loader from persisted membership/registered fixtures. The web UI does not expose editable fields for bearer identity, tenant, role, or permissions.
 
 Logout calls `POST /api/v1/auth/logout` and clears the signed session cookie.
 
 ## APIs added or changed
 
 - Added `GET /api/v1/auth/session`.
+- Added `POST /api/v1/auth/login`.
 - Added `POST /api/v1/auth/logout`.
 - Extended `GET /api/v1/rfqs` with validated filters: `status`, `procurementCategory`, `createdFrom`, `createdTo`, `deadlineFrom`, `deadlineTo`, `buyerId`, `sort`, and `direction`.
 - Added `GET /api/v1/rfqs/overview` for server-side work-queue counts and limited records.
@@ -52,7 +53,8 @@ Client-side navigation only improves usability. Backend authentication, authoriz
 ## Required environment variables
 
 - `API_ORIGIN`: web rewrite target for `/api/:path*`; defaults to `http://localhost:3001`.
-- `PROCUREMENT_SESSION_SECRET`: HMAC secret used to verify signed production/development session cookies.
+- `PROCUREMENT_SESSION_SECRET`: HMAC secret, at least 32 characters, used to issue and verify signed production/development session cookies.
+- `ENABLE_DEVELOPMENT_LOGIN`: optional non-production-only flag for development session establishment.
 - `DATABASE_URL`: PostgreSQL connection for API, Prisma, migrations, validation, and integration tests.
 - Existing API and database variables from `.env.example`, `apps/api/.env.example`, and `packages/database/.env.example` still apply.
 
