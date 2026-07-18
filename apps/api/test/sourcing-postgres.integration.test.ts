@@ -135,8 +135,13 @@ runWhenDatabase('sourcing PostgreSQL integration', () => {
     return supplierId;
   }
 
-  async function seedRfq(status = 'DRAFT', supplierStatus = 'ACTIVE', inviteStatus = 'DRAFT') {
-    const supplierId = await seedSupplier(supplierStatus as 'ACTIVE');
+  async function seedRfq(
+    status = 'DRAFT',
+    supplierStatus: 'ACTIVE' | 'SUSPENDED' | 'BLOCKED' | 'INACTIVE' | 'REJECTED' = 'ACTIVE',
+    inviteStatus = 'DRAFT',
+    qualification: 'APPROVED' | 'PENDING' | 'REJECTED' | 'EXPIRED' = 'APPROVED',
+  ) {
+    const supplierId = await seedSupplier(supplierStatus, qualification);
     const rfq = (
       await client.query(
         "INSERT INTO rfqs(tenant_id,rfq_number,title,procurement_category,buyer_id,currency,clarification_deadline,submission_deadline,required_by,delivery_location,status) VALUES($1,$2,'RFQ','category',$3,'USD',now()+interval '1 day',now()+interval '2 days',current_date+7,'Dock',$4) RETURNING *",
@@ -279,7 +284,7 @@ runWhenDatabase('sourcing PostgreSQL integration', () => {
 
     const open = await seedRfq('QUOTATION_OPEN');
     await client.query(
-      "UPDATE rfqs SET submission_deadline=now()-interval '1 minute' WHERE id=$1",
+      "UPDATE rfqs SET published_at=now()-interval '3 hours',clarification_deadline=now()-interval '2 hours',submission_deadline=now()-interval '1 hour' WHERE id=$1",
       [open.rfq.id],
     );
     await service.terminal(
@@ -322,20 +327,28 @@ runWhenDatabase('sourcing PostgreSQL integration', () => {
   });
 
   it('enforces supplier eligibility from persisted membership and RLS cross-supplier isolation', async () => {
-    const active = await seedRfq('QUOTATION_OPEN');
-    await client.query("UPDATE rfq_supplier_invitations SET status='ACCEPTED' WHERE id=$1", [
-      active.invitationId,
-    ]);
+    async function resetSupplierUserMemberships() {
+      await client.query(
+        'UPDATE supplier_user_memberships SET active=false WHERE tenant_id=$1 AND user_id=$2',
+        [tenantId, supplierUserId],
+      );
+    }
+
+    await resetSupplierUserMemberships();
+    const active = await seedRfq('QUOTATION_OPEN', 'ACTIVE', 'ACCEPTED');
     await expect(service.inbox(supplierPrincipal())).resolves.toBeDefined();
+
     for (const status of ['SUSPENDED', 'BLOCKED', 'INACTIVE', 'REJECTED'] as const) {
-      await client.query('UPDATE suppliers SET status=$1 WHERE id=$2', [status, active.supplierId]);
+      await resetSupplierUserMemberships();
+      await seedRfq('QUOTATION_OPEN', status, 'ACCEPTED');
       await expect(service.inbox(supplierPrincipal())).rejects.toThrow();
     }
-    await client.query(
-      "UPDATE suppliers SET status='ACTIVE', qualification_status='EXPIRED' WHERE id=$1",
-      [active.supplierId],
-    );
-    await expect(service.inbox(supplierPrincipal())).rejects.toThrow();
+
+    for (const qualification of ['PENDING', 'EXPIRED'] as const) {
+      await resetSupplierUserMemberships();
+      await seedRfq('QUOTATION_OPEN', 'ACTIVE', 'ACCEPTED', qualification);
+      await expect(service.inbox(supplierPrincipal())).rejects.toThrow();
+    }
 
     await client.query('BEGIN');
     await client.query(`SET LOCAL ROLE ${applicationRole}`);

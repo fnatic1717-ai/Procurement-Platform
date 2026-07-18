@@ -7,7 +7,7 @@
     "dev": "tsx src/main.ts",
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run --passWithNoTests",
+    "test": "vitest run --exclude '**/*.integration.test.ts' --passWithNoTests",
     "test:integration": "vitest run test/foundation.test.ts test/sourcing-postgres.integration.test.ts"
   },
   "dependencies": {
