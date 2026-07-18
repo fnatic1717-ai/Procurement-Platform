@@ -33,7 +33,7 @@ import {
   Min,
 } from 'class-validator';
 import { createHash } from 'node:crypto';
-import { prisma, type TransactionClient } from '@procurement/database';
+import { Prisma, prisma, type TransactionClient } from '@procurement/database';
 import type { AuthenticatedPrincipal } from '@procurement/shared';
 import type { Request } from 'express';
 import { AuditService } from '../audit/audit.js';
@@ -43,6 +43,29 @@ class PageDto {
   @IsOptional() @Type(() => Number) @IsInt() @Min(1) page = 1;
   @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(100) limit = 25;
   @IsOptional() @IsString() @MaxLength(200) search?: string;
+}
+class RfqPageDto extends PageDto {
+  @IsOptional()
+  @IsIn([
+    'DRAFT',
+    'READY_FOR_REVIEW',
+    'PUBLISHED',
+    'CLARIFICATION_OPEN',
+    'QUOTATION_OPEN',
+    'QUOTATION_CLOSED',
+    'CANCELLED',
+    'CLOSED',
+  ])
+  status?: string;
+  @IsOptional() @IsString() @MaxLength(150) procurementCategory?: string;
+  @IsOptional() @IsDateString() createdFrom?: string;
+  @IsOptional() @IsDateString() createdTo?: string;
+  @IsOptional() @IsDateString() deadlineFrom?: string;
+  @IsOptional() @IsDateString() deadlineTo?: string;
+  @IsOptional() @IsUUID() buyerId?: string;
+  @IsOptional() @IsIn(['created_at', 'updated_at', 'submission_deadline', 'title', 'status']) sort =
+    'created_at';
+  @IsOptional() @IsIn(['asc', 'desc']) direction: 'asc' | 'desc' = 'desc';
 }
 class VersionDto {
   @IsInt() @Min(1) version!: number;
@@ -424,16 +447,67 @@ export class SourcingService {
       return r;
     });
   }
-  async rfqs(p: AuthenticatedPrincipal, q: PageDto) {
+  async rfqs(p: AuthenticatedPrincipal, q: RfqPageDto) {
     return this.tx(p, async (tx) => {
-      const items =
-        await tx.$queryRaw`SELECT id,rfq_number,title,status,currency,submission_deadline,version FROM rfqs WHERE (${q.search ?? null}::text IS NULL OR title ILIKE '%'||${q.search ?? ''}||'%') ORDER BY created_at DESC LIMIT ${q.limit} OFFSET ${(q.page - 1) * q.limit}`;
+      const filters: Prisma.Sql[] = [];
+      if (q.search)
+        filters.push(
+          Prisma.sql`(title ILIKE '%'||${q.search}||'%' OR rfq_number ILIKE '%'||${q.search}||'%')`,
+        );
+      if (q.status) filters.push(Prisma.sql`status=${q.status}::rfq_status`);
+      if (q.procurementCategory)
+        filters.push(Prisma.sql`procurement_category=${q.procurementCategory}`);
+      if (q.createdFrom) filters.push(Prisma.sql`created_at>=${q.createdFrom}::timestamptz`);
+      if (q.createdTo) filters.push(Prisma.sql`created_at<=${q.createdTo}::timestamptz`);
+      if (q.deadlineFrom)
+        filters.push(Prisma.sql`submission_deadline>=${q.deadlineFrom}::timestamptz`);
+      if (q.deadlineTo) filters.push(Prisma.sql`submission_deadline<=${q.deadlineTo}::timestamptz`);
+      if (q.buyerId) filters.push(Prisma.sql`buyer_id=${q.buyerId}::uuid`);
+      const where = filters.length
+        ? Prisma.sql`WHERE ${Prisma.join(filters, ' AND ')}`
+        : Prisma.empty;
+      const sort: Record<string, Prisma.Sql> = {
+        created_at: Prisma.sql`created_at`,
+        updated_at: Prisma.sql`updated_at`,
+        submission_deadline: Prisma.sql`submission_deadline`,
+        title: Prisma.sql`title`,
+        status: Prisma.sql`status`,
+      };
+      const direction = q.direction === 'asc' ? Prisma.sql`ASC` : Prisma.sql`DESC`;
+      const items = await tx.$queryRaw(
+        Prisma.sql`SELECT id,rfq_number,title,status,procurement_category,buyer_id,currency,clarification_deadline,submission_deadline,created_at,updated_at,version FROM rfqs ${where} ORDER BY ${sort[q.sort] ?? sort.created_at} ${direction}, id ASC LIMIT ${q.limit} OFFSET ${(q.page - 1) * q.limit}`,
+      );
       const total = one(
-        await tx.$queryRaw<
-          { count: number }[]
-        >`SELECT count(*)::int count FROM rfqs WHERE (${q.search ?? null}::text IS NULL OR title ILIKE '%'||${q.search ?? ''}||'%')`,
+        await tx.$queryRaw<{ count: number }[]>(
+          Prisma.sql`SELECT count(*)::int count FROM rfqs ${where}`,
+        ),
       ).count;
       return { items, total, page: q.page, limit: q.limit };
+    });
+  }
+  async rfqOverview(p: AuthenticatedPrincipal) {
+    return this.tx(p, async (tx) => {
+      const rows = await tx.$queryRaw<
+        { queue: string; count: number; records: unknown }[]
+      >(Prisma.sql`
+        WITH queues(name,statuses) AS (VALUES
+          ('drafts',ARRAY['DRAFT']::rfq_status[]),
+          ('readyForReview',ARRAY['READY_FOR_REVIEW']::rfq_status[]),
+          ('clarificationOpen',ARRAY['CLARIFICATION_OPEN']::rfq_status[]),
+          ('quotationOpen',ARRAY['QUOTATION_OPEN']::rfq_status[]),
+          ('readyToClose',ARRAY['QUOTATION_CLOSED']::rfq_status[])
+        )
+        SELECT q.name queue, count(r.id)::int count, COALESCE(jsonb_agg(to_jsonb(r) ORDER BY r.updated_at DESC, r.id) FILTER (WHERE r.rn<=5),'[]') records
+        FROM queues q
+        LEFT JOIN (
+          SELECT id,rfq_number,title,status,currency,submission_deadline,updated_at,row_number() OVER(PARTITION BY status ORDER BY updated_at DESC,id) rn FROM rfqs
+        ) r ON r.status=ANY(q.statuses)
+        GROUP BY q.name
+        UNION ALL
+        SELECT 'recentlyUpdated', count(*)::int, COALESCE(jsonb_agg(to_jsonb(x) ORDER BY x.updated_at DESC,x.id),'[]')
+        FROM (SELECT id,rfq_number,title,status,currency,submission_deadline,updated_at FROM rfqs ORDER BY updated_at DESC,id LIMIT 10) x
+      `);
+      return Object.fromEntries(rows.map((r) => [r.queue, { count: r.count, records: r.records }]));
     });
   }
   async invite(p: AuthenticatedPrincipal, id: string, d: InvitationDto) {
@@ -740,7 +814,7 @@ export class SourcingService {
       one(
         await tx.$queryRaw<
           unknown[]
-        >`SELECT r.*,COALESCE((SELECT jsonb_agg(to_jsonb(l) ORDER BY line_sequence) FROM rfq_lines l WHERE l.rfq_id=r.id),'[]') lines,COALESCE((SELECT jsonb_agg(to_jsonb(i)) FROM rfq_supplier_invitations i WHERE i.rfq_id=r.id),'[]') invitations FROM rfqs r WHERE id=${id}::uuid`,
+        >`SELECT r.*,COALESCE((SELECT jsonb_agg(to_jsonb(l) ORDER BY line_sequence) FROM rfq_lines l WHERE l.rfq_id=r.id),'[]') lines,COALESCE((SELECT jsonb_agg(to_jsonb(i)||jsonb_build_object('supplierLegalName',s.legal_name,'supplierContactName',c.full_name) ORDER BY i.created_at) FROM rfq_supplier_invitations i JOIN suppliers s ON s.id=i.supplier_id LEFT JOIN supplier_contacts c ON c.id=i.supplier_contact_id WHERE i.rfq_id=r.id),'[]') invitations FROM rfqs r WHERE id=${id}::uuid`,
       ),
     );
   }
@@ -1101,6 +1175,21 @@ export class SourcingService {
       return { items, total, page: q.page, limit: q.limit };
     });
   }
+
+  async rfqAudit(p: AuthenticatedPrincipal, rfqId: string, q: PageDto) {
+    return this.tx(p, async (tx) => {
+      const items = await tx.$queryRaw(
+        Prisma.sql`SELECT id,action,actor_id,actor_type,object_type,object_id,prior_state,resulting_state,created_at FROM audit_events WHERE object_id=${rfqId}::uuid ORDER BY created_at DESC,id DESC LIMIT ${q.limit} OFFSET ${(q.page - 1) * q.limit}`,
+      );
+      const total = one(
+        await tx.$queryRaw<{ count: number }[]>(
+          Prisma.sql`SELECT count(*)::int count FROM audit_events WHERE object_id=${rfqId}::uuid`,
+        ),
+      ).count;
+      return { items, total, page: q.page, limit: q.limit };
+    });
+  }
+
   async invitationDetail(p: AuthenticatedPrincipal, id: string) {
     return this.tx(p, async (tx) => {
       const sid = await this.supplier(tx, p);
@@ -1283,8 +1372,11 @@ export class SourcingController {
   ) {
     return this.s.status(actor(r), id, d, 'BLOCKED');
   }
-  @Get('rfqs') @RequirePermissions('rfqs.read') rfqs(@Req() r: Request, @Query() q: PageDto) {
+  @Get('rfqs') @RequirePermissions('rfqs.read') rfqs(@Req() r: Request, @Query() q: RfqPageDto) {
     return this.s.rfqs(actor(r), q);
+  }
+  @Get('rfqs/overview') @RequirePermissions('rfqs.read') rfqOverview(@Req() r: Request) {
+    return this.s.rfqOverview(actor(r));
   }
   @Post('rfqs') @RequirePermissions('rfqs.create') rfq(@Req() r: Request, @Body() d: RfqDto) {
     return this.s.createRfq(actor(r), d);
@@ -1505,6 +1597,13 @@ export class SourcingController {
     @Query() q: PageDto,
   ) {
     return this.s.buyerQuotations(actor(r), id, q);
+  }
+  @Get('rfqs/:id/audit') @RequirePermissions('rfqs.read') rfqAudit(
+    @Req() r: Request,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() q: PageDto,
+  ) {
+    return this.s.rfqAudit(actor(r), id, q);
   }
   @Get('supplier-portal/invitations/:id')
   @RequirePermissions('supplier_portal.rfqs.read_invited')

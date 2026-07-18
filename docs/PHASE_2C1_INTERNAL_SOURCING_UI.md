@@ -1,81 +1,85 @@
 # Phase 2C-1: Internal Sourcing Workspace
 
-Phase 2C-1 implements the authenticated internal buyer workspace for day-to-day RFQ work. The UI uses the Phase 2B backend as the source of truth and does not create mock RFQs, sample suppliers, fabricated KPI totals, browser-only draft records, or simulated activity.
+Phase 2C-1 implements the internal buyer sourcing workspace against persisted Phase 2B RFQ, supplier, invitation, clarification, quotation, and audit data. The UI does not use mock RFQs, sample suppliers, fabricated KPIs, browser-only draft records, or simulated activity.
 
-## Scope delivered
+## Operational routes
 
-- Authenticated application shell with collapsible sidebar, top context, breadcrumbs, tenant identity, user identity, current role display, and permission-aware navigation.
-- Real sourcing overview work queues grouped from RFQs returned by `GET /api/v1/rfqs`.
-- RFQ list with server-side pagination contract, search, status/date/category filter controls, URL query preservation, row navigation, loading, empty, forbidden, conflict, and server-error states.
-- RFQ draft creation through `POST /api/v1/rfqs` and RFQ line creation through `POST /api/v1/rfqs/:id/lines`.
-- RFQ workspace showing persisted header fields, lines, supplier invitations, clarifications, quotations, files/terms notes, and activity/audit guidance only where backend data exists.
-- Workflow transitions using `POST /api/v1/rfqs/:id/transition` with current RFQ version and an idempotency key generated for the user action.
-- Supplier invitation creation using `POST /api/v1/rfqs/:id/invitations` and persisted suppliers from `GET /api/v1/suppliers`.
-- Internal clarification read model using `GET /api/v1/rfqs/:id/clarifications` and quotation read model using `GET /api/v1/rfqs/:id/quotations` when authorized.
+- `/sourcing`: tenant-scoped sourcing overview from `GET /api/v1/rfqs/overview`.
+- `/sourcing/rfqs`: RFQ list from `GET /api/v1/rfqs` with server-side pagination, search, filters, and deterministic sorting.
+- `/sourcing/rfqs/new`: RFQ draft creation through `POST /api/v1/rfqs`.
+- `/sourcing/rfqs/[id]`: RFQ workspace for header editing, lines, invitations, clarifications, quotations, terms, and audit timeline.
+- `/sourcing/suppliers`: authorized supplier list from `GET /api/v1/suppliers`.
 
-## Internal routes
+The root route redirects to `/sourcing`.
 
-The current web application is implemented at `/` and exposes these internal sourcing views within the authenticated shell:
+## Authenticated session flow
 
-- Sourcing overview
-- RFQs
-- Create RFQ draft
-- Suppliers
-- Activity and audit guidance
-- RFQ detail workspace opened from a real RFQ row
+The browser no longer controls tenant ID, user ID, role, permissions, or development bearer identity. The web app loads `GET /api/v1/auth/session` using `credentials: include`. The API derives session identity, active tenant membership, actor type, role label, and permissions from the authenticated backend principal.
 
-## Required environment variables
+Supported authentication inputs are backend-controlled:
 
-The web application uses the existing Next.js rewrite configuration:
+- Production: signed `procurement_session` HTTP-only cookie verified with `PROCUREMENT_SESSION_SECRET`.
+- Development/test: existing development bearer authentication may still be used by API tests and non-production tooling, but permissions are still loaded by the backend principal loader from persisted membership/registered fixtures. The web UI does not expose editable fields for bearer identity, tenant, role, or permissions.
 
-- `API_ORIGIN`: backend API origin used by `/api/:path*` rewrites. Defaults to `http://localhost:3001`.
+Logout calls `POST /api/v1/auth/logout` and clears the signed session cookie.
 
-The API still requires the existing backend environment from `.env.example`, `apps/api/.env.example`, and `packages/database/.env.example`, including database connectivity and authentication adapter configuration.
+## APIs added or changed
 
-## Running the web application
-
-```bash
-pnpm install
-pnpm db:generate
-pnpm --filter @procurement/api dev
-API_ORIGIN=http://localhost:3001 pnpm --filter @procurement/web dev
-```
-
-The development sign-in form expects a real tenant ID, user ID, and comma-separated persisted permissions. These values are used to send the development bearer token and tenant header required by the existing API guards. The backend remains authoritative for membership and permission enforcement.
-
-## Running frontend tests
-
-```bash
-pnpm --filter @procurement/web test
-pnpm --filter @procurement/web typecheck
-pnpm --filter @procurement/web lint
-```
-
-## Running real integration tests
-
-```bash
-pnpm db:migrate
-pnpm test:integration
-```
-
-Integration tests use the configured PostgreSQL database and the existing API/database packages. Tests labeled integration must not replace tenant isolation, authorization, or database behavior with in-memory fakes.
+- Added `GET /api/v1/auth/session`.
+- Added `POST /api/v1/auth/logout`.
+- Extended `GET /api/v1/rfqs` with validated filters: `status`, `procurementCategory`, `createdFrom`, `createdTo`, `deadlineFrom`, `deadlineTo`, `buyerId`, `sort`, and `direction`.
+- Added `GET /api/v1/rfqs/overview` for server-side work-queue counts and limited records.
+- Added `GET /api/v1/rfqs/:id/audit` for tenant-scoped persisted RFQ audit events.
+- Existing Phase 2B mutation endpoints remain authoritative for RFQ header edits, lines, invitations, transitions, close, cancel, deadline extension, clarification responses, and clarification close.
 
 ## Roles and permissions used
 
-Navigation and actions are derived from persisted permissions loaded into the current principal by the backend authorization model:
-
-- `rfqs.read`: sourcing overview, RFQ list, RFQ workspace.
+- `rfqs.read`: overview, RFQ list, RFQ workspace, RFQ audit timeline.
 - `rfqs.create`: create RFQ draft.
-- `rfqs.update_draft`: add RFQ lines while the RFQ is in draft status.
-- `rfqs.publish`: valid RFQ state transitions from the Phase 2B state machine.
-- `rfq_invitations.manage`: supplier invitation creation and management.
-- `rfq_clarifications.manage`: internal clarification visibility and responses where supported.
-- `quotations.read`: internal quotation visibility.
-- `quotations.read_commercial`: commercial quotation fields when the backend returns them.
-- `suppliers.read`: supplier navigation and supplier selection records.
+- `rfqs.update_draft`: edit RFQ header and add/edit/delete RFQ lines while backend state allows it.
+- `rfqs.publish`: Phase 2B transition endpoint actions up to quotation closed.
+- `rfqs.close`: close `QUOTATION_CLOSED` RFQs.
+- `rfqs.cancel`: cancel eligible RFQs with a reason.
+- `rfqs.extend_deadline`: extend supported RFQ deadlines with a reason.
+- `rfq_invitations.manage`: add and revoke invitations.
+- `rfq_clarifications.manage`: read/respond/close internal clarification threads.
+- `quotations.read`: read non-draft internal quotation records.
+- `quotations.read_commercial`: display commercial quotation fields returned by the backend.
+- `suppliers.read`: supplier list and supplier/contact selection.
 
-Client-side navigation hiding is only a usability improvement; it is not a security control. The backend remains authoritative for RBAC, tenant isolation, optimistic concurrency, idempotency, and audit behavior.
+Client-side navigation only improves usability. Backend authentication, authorization, tenant isolation, optimistic concurrency, idempotency, and audit behavior remain authoritative.
 
-## Deferred to Phase 2C-2
+## Required environment variables
 
-Phase 2C-2 will implement the complete external Supplier Portal and supplier quotation-editing experience. Deferred items include supplier-facing RFQ discovery, invitation response workspace, private supplier question authoring, supplier quotation draft editing, quotation line editing, revision management, withdrawal flows, and supplier-facing confidentiality controls.
+- `API_ORIGIN`: web rewrite target for `/api/:path*`; defaults to `http://localhost:3001`.
+- `PROCUREMENT_SESSION_SECRET`: HMAC secret used to verify signed production/development session cookies.
+- `DATABASE_URL`: PostgreSQL connection for API, Prisma, migrations, validation, and integration tests.
+- Existing API and database variables from `.env.example`, `apps/api/.env.example`, and `packages/database/.env.example` still apply.
+
+## Running locally
+
+```bash
+pnpm install
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/procurement pnpm db:generate
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/procurement pnpm --filter @procurement/api dev
+API_ORIGIN=http://localhost:3001 pnpm --filter @procurement/web dev
+```
+
+## Testing
+
+```bash
+pnpm format:check
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/procurement pnpm db:validate
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/procurement pnpm lint
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/procurement pnpm typecheck
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/procurement pnpm test
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/procurement pnpm test:integration
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/procurement pnpm build
+pnpm audit:deps
+```
+
+Real PostgreSQL integration suites require a reachable PostgreSQL server. If `DATABASE_URL` points to a stopped or missing server, integration tests fail with a connection error rather than silently replacing the database with an in-memory fake.
+
+## Phase 2C-2 deferred scope
+
+Phase 2C-2 will implement the complete external Supplier Portal and supplier quotation-editing experience, including supplier-facing RFQ workspace, invitation response UI, supplier private question authoring, quotation draft editing, quotation line editing, revision management, withdrawal flows, and supplier-facing confidentiality controls.
