@@ -590,3 +590,269 @@ model IdempotencyRecord {
   @@index([tenantId, objectId, operation])
   @@map("idempotency_records")
 }
+
+enum SupplierStatus {
+  DRAFT
+  PENDING_QUALIFICATION
+  ACTIVE
+  SUSPENDED
+  BLOCKED
+  INACTIVE
+  REJECTED
+
+  @@map("supplier_status")
+}
+
+enum QualificationStatus {
+  NOT_STARTED
+  PENDING
+  UNDER_REVIEW
+  APPROVED
+  REJECTED
+  EXPIRED
+
+  @@map("qualification_status")
+}
+
+enum RfqStatus {
+  DRAFT
+  READY_FOR_REVIEW
+  PUBLISHED
+  CLARIFICATION_OPEN
+  QUOTATION_OPEN
+  QUOTATION_CLOSED
+  CANCELLED
+  CLOSED
+
+  @@map("rfq_status")
+}
+
+enum InvitationStatus {
+  DRAFT
+  SENT
+  VIEWED
+  ACCEPTED
+  DECLINED
+  EXPIRED
+  REVOKED
+
+  @@map("invitation_status")
+}
+
+enum QuotationStatus {
+  DRAFT
+  SUBMITTED
+  REVISED
+  WITHDRAWN
+  LATE_REJECTED
+  LOCKED
+
+  @@map("quotation_status")
+}
+
+model Supplier {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@map("suppliers")
+}
+
+model SupplierContact {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@map("supplier_contacts")
+}
+
+model SupplierAddress {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@map("supplier_addresses")
+}
+
+model SupplierCategory {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@map("supplier_categories")
+}
+
+model SupplierCategoryAssignment {
+  tenantId   String @map("tenant_id") @db.Uuid
+  supplierId String @map("supplier_id") @db.Uuid
+  categoryId String @map("category_id") @db.Uuid
+  assignedBy String @map("assigned_by") @db.Uuid
+
+  @@id([tenantId, supplierId, categoryId])
+  @@map("supplier_category_assignments")
+}
+
+model SupplierQualificationRecord {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@map("supplier_qualification_records")
+}
+
+model SupplierComplianceDocument {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@map("supplier_compliance_documents")
+}
+
+model SupplierInternalNote {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@map("supplier_internal_notes")
+}
+
+model SupplierUserMembership {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@map("supplier_user_memberships")
+}
+
+model Rfq {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@map("rfqs")
+}
+
+model RfqLine {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@map("rfq_lines")
+}
+
+model RfqPurchaseRequestLink {
+  tenantId          String @map("tenant_id") @db.Uuid
+  rfqId             String @map("rfq_id") @db.Uuid
+  purchaseRequestId String @map("purchase_request_id") @db.Uuid
+  sourceSnapshot    Json   @map("source_snapshot")
+
+  @@id([tenantId, rfqId, purchaseRequestId])
+  @@map("rfq_purchase_request_links")
+}
+
+model RfqSupplierInvitation {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@map("rfq_supplier_invitations")
+}
+
+model RfqClarificationThread {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@map("rfq_clarification_threads")
+}
+
+model RfqClarificationMessage {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@map("rfq_clarification_messages")
+}
+
+model Quotation {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@map("quotations")
+}
+
+model QuotationLine {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@map("quotation_lines")
+}
+
+model QuotationRevision {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@map("quotation_revisions")
+}
+
+model QuotationAttachment {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@map("quotation_attachments")
+}
+
+model RfqTerm {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@map("rfq_terms")
+}
+
+model RfqActivityEvent {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+  @@map("rfq_activity_events")
+}
+
+model SourcingIdempotency {
+  tenantId       String   @map("tenant_id") @db.Uuid
+  actorId        String   @map("actor_id") @db.Uuid
+  operation      String
+  objectId       String   @map("object_id") @db.Uuid
+  idempotencyKey String   @map("idempotency_key")
+  payloadHash    String   @map("payload_hash") @db.Char(64)
+  response       Json?
+  completed      Boolean  @default(false)
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@id([tenantId, actorId, operation, objectId, idempotencyKey])
+  @@index([tenantId, actorId, operation, objectId])
+  @@map("sourcing_idempotency")
+}

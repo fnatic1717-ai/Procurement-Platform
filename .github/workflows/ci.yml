@@ -37,6 +37,8 @@ jobs:
       CORS_ORIGIN: http://localhost:3000
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: pnpm/action-setup@v4
         with:
           version: 9.12.3
@@ -102,12 +104,62 @@ jobs:
         run: |
           set -o pipefail
           pnpm audit:deps 2>&1 | tee ci-logs/dependency-audit.log
+      - name: Prepare secret scan revision range
+        id: gitleaks_range
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BASE_SHA: ${{ github.event.before }}
+          PUSH_HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            BASE_SHA="$PR_BASE_SHA"
+            HEAD_SHA="$PR_HEAD_SHA"
+            git fetch --no-tags origin "$BASE_SHA" "$HEAD_SHA"
+          else
+            BASE_SHA="$PUSH_BASE_SHA"
+            HEAD_SHA="$PUSH_HEAD_SHA"
+            if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]]; then
+              BASE_SHA="$(git rev-list --max-parents=0 "$HEAD_SHA" | head -n 1)"
+            fi
+            git fetch --no-tags origin "$BASE_SHA" "$HEAD_SHA"
+          fi
+          git cat-file -e "$BASE_SHA^{commit}"
+          git cat-file -e "$HEAD_SHA^{commit}"
+          RANGE="$BASE_SHA..$HEAD_SHA"
+          echo "Scanning Git revision range: $RANGE"
+          echo "range=$RANGE" >> "$GITHUB_OUTPUT"
+
       - name: Secret scan
         id: gitleaks
-        continue-on-error: true
-        uses: gitleaks/gitleaks-action@v2
         env:
-          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          GITLEAKS_RANGE: ${{ steps.gitleaks_range.outputs.range }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD:/repo" \
+            zricethezav/gitleaks:v8.24.2 \
+            git /repo \
+            --log-opts="$GITLEAKS_RANGE" \
+            --report-format=sarif \
+            --report-path=/repo/ci-logs/gitleaks.sarif \
+            --redact \
+            --exit-code=1
+
+      - name: Upload secret scan SARIF
+        if: always() && hashFiles('ci-logs/gitleaks.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ci-logs/gitleaks.sarif
+
+      - name: Upload secret scan artifact
+        if: always() && hashFiles('ci-logs/gitleaks.sarif') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-sarif
+          path: ci-logs/gitleaks.sarif
 
       - name: Create quality summary
         if: always()
@@ -136,6 +188,6 @@ jobs:
       - name: Final quality gate
         if: always()
         run: |
-          if grep -Eq '^(migration|lint|typecheck|unit_tests|integration_tests|build|database_validation|dependency_audit)=(failure|cancelled|skipped)$' ci-logs/quality-summary.txt; then
+          if grep -Eq '^(migration|format|lint|typecheck|unit_tests|integration_tests|build|database_validation|dependency_audit|secret_scan)=(failure|cancelled|skipped)$' ci-logs/quality-summary.txt; then
             exit 1
           fi

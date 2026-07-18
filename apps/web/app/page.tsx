@@ -1,7 +1,15 @@
 'use client';
 import { FormEvent, useCallback, useEffect, useState } from 'react';
 type Json = Record<string, unknown>;
-type View = 'requests' | 'create' | 'approvals' | 'intake' | 'policies';
+type View =
+  | 'requests'
+  | 'create'
+  | 'approvals'
+  | 'intake'
+  | 'policies'
+  | 'suppliers'
+  | 'rfqs'
+  | 'invitations';
 type PageResult = { items: Json[]; total: number; page: number; limit: number };
 const blank: PageResult = { items: [], total: 0, page: 1, limit: 25 };
 async function api(path: string, init?: RequestInit) {
@@ -54,7 +62,13 @@ export default function Page() {
             ? '/approvals/inbox'
             : view === 'intake'
               ? '/procurement-intake'
-              : '/approval-policies';
+              : view === 'suppliers'
+                ? '/suppliers'
+                : view === 'rfqs'
+                  ? '/rfqs'
+                  : view === 'invitations'
+                    ? '/supplier-portal/invitations'
+                    : '/approval-policies';
       const params = new URLSearchParams();
       Object.entries(query).forEach(([k, v]) => {
         if (v) params.set(k, String(v));
@@ -78,6 +92,7 @@ export default function Page() {
     setError('');
     try {
       const id = text(row.id);
+      if (view === 'rfqs' || view === 'invitations') return;
       const path =
         view === 'requests'
           ? `/purchase-requests/${id}`
@@ -85,7 +100,9 @@ export default function Page() {
             ? `/approvals/${id}`
             : view === 'intake'
               ? `/procurement-intake/${id}`
-              : `/approval-policies/${id}`;
+              : view === 'suppliers'
+                ? `/suppliers/${id}`
+                : `/approval-policies/${id}`;
       setSelected(await api(path));
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Unable to load detail');
@@ -132,6 +149,30 @@ export default function Page() {
             }}
           />
           <Nav
+            label="Supplier Management"
+            active={view === 'suppliers'}
+            onClick={() => {
+              setSelected(null);
+              setView('suppliers');
+            }}
+          />
+          <Nav
+            label="Request for Quotations"
+            active={view === 'rfqs'}
+            onClick={() => {
+              setSelected(null);
+              setView('rfqs');
+            }}
+          />
+          <Nav
+            label="My Supplier Invitations"
+            active={view === 'invitations'}
+            onClick={() => {
+              setSelected(null);
+              setView('invitations');
+            }}
+          />
+          <Nav
             label="Approval Policies"
             active={view === 'policies'}
             onClick={() => {
@@ -140,11 +181,13 @@ export default function Page() {
             }}
           />
         </nav>
-        <small>RFQs, quotations, awards, and purchase orders are future phases.</small>
+        <small>
+          Supplier sourcing is available according to your persisted role and permissions.
+        </small>
       </aside>
       <section className="content">
         <header>
-          <p className="eyebrow">Phase 2A workspace</p>
+          <p className="eyebrow">Procurement workspace</p>
           <h2>
             {selected
               ? 'Record detail'
@@ -156,7 +199,13 @@ export default function Page() {
                     ? 'My Approval Inbox'
                     : view === 'intake'
                       ? 'Procurement Intake Queue'
-                      : 'Approval Policies'}
+                      : view === 'suppliers'
+                        ? 'Supplier Management'
+                        : view === 'rfqs'
+                          ? 'Request for Quotations'
+                          : view === 'invitations'
+                            ? 'My Supplier Invitations'
+                            : 'Approval Policies'}
           </h2>
         </header>
         {error && (
@@ -197,6 +246,9 @@ export default function Page() {
             <Records view={view} data={data} open={open} />
             <Pager data={data} setPage={(page) => setQuery((q) => ({ ...q, page }))} />
             {view === 'policies' && <PolicyForm done={load} fail={setError} />}
+            {(view === 'suppliers' || view === 'rfqs') && (
+              <SourcingCreate view={view} done={load} fail={setError} />
+            )}
           </>
         )}
       </section>
@@ -405,7 +457,13 @@ function Records({ view, data, open }: { view: View; data: PageResult; open: (r:
                 ? ['Request', 'Status', 'Priority', 'Buyer', 'Aging']
                 : view === 'policies'
                   ? ['Policy', 'Status', 'Priority', 'Version']
-                  : ['Request', 'Title', 'Status', 'Value', 'Required by']
+                  : view === 'suppliers'
+                    ? ['Supplier', 'Legal name', 'Status', 'Qualification']
+                    : view === 'rfqs'
+                      ? ['RFQ', 'Title', 'Status', 'Deadline']
+                      : view === 'invitations'
+                        ? ['RFQ', 'Title', 'Status', 'Deadline']
+                        : ['Request', 'Title', 'Status', 'Value', 'Required by']
             ).map((h) => (
               <th key={h}>{h}</th>
             ))}
@@ -441,6 +499,22 @@ function Records({ view, data, open }: { view: View; data: PageResult; open: (r:
                   <td>{r.active ? 'Active' : 'Inactive'}</td>
                   <td>{text(r.priority)}</td>
                   <td>{text(r.version)}</td>
+                </>
+              ) : view === 'suppliers' ? (
+                <>
+                  {' '}
+                  <td>{text(r.supplier_number ?? r.supplierNumber)}</td>
+                  <td>{text(r.legal_name ?? r.legalName)}</td>
+                  <td>{text(r.status)}</td>
+                  <td>{text(r.qualification_status ?? r.qualificationStatus)}</td>{' '}
+                </>
+              ) : view === 'rfqs' || view === 'invitations' ? (
+                <>
+                  {' '}
+                  <td>{text(r.rfq_number ?? r.rfqNumber)}</td>
+                  <td>{text(r.title)}</td>
+                  <td>{text(r.status)}</td>
+                  <td>{date(r.submission_deadline ?? r.submissionDeadline)}</td>{' '}
                 </>
               ) : (
                 <>
@@ -1075,4 +1149,64 @@ function PolicyForm({
 }
 function date(v: unknown) {
   return v ? new Date(String(v)).toLocaleDateString('en') : '';
+}
+
+function SourcingCreate({
+  view,
+  done,
+  fail,
+}: {
+  view: 'suppliers' | 'rfqs';
+  done: () => Promise<void>;
+  fail: (message: string) => void;
+}) {
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const body = Object.fromEntries(
+      [...new FormData(event.currentTarget)].filter(([, value]) => value !== ''),
+    );
+    try {
+      await api(view === 'suppliers' ? '/suppliers' : '/rfqs', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+      event.currentTarget.reset();
+      await done();
+    } catch (error) {
+      fail(error instanceof Error ? error.message : 'Unable to save sourcing record');
+    }
+  }
+  return (
+    <form
+      className="request-form"
+      onSubmit={(event) => void submit(event)}
+      aria-label={view === 'suppliers' ? 'Create supplier' : 'Create RFQ draft'}
+    >
+      <h3 className="wide">{view === 'suppliers' ? 'Create supplier' : 'Create RFQ draft'}</h3>
+      {view === 'suppliers' ? (
+        <>
+          <Field name="legalName" required />
+          <Field name="tradingName" />
+          <Field name="supplierType" required />
+          <Field name="country" required />
+          <Field name="defaultCurrency" required />
+          <Field name="primaryEmail" type="email" />
+          <Field name="primaryPhone" />
+        </>
+      ) : (
+        <>
+          <Field name="title" required />
+          <Field name="procurementCategory" required />
+          <Field name="currency" required />
+          <Field name="clarificationDeadline" type="datetime-local" required />
+          <Field name="submissionDeadline" type="datetime-local" required />
+          <Field name="requiredBy" type="date" required />
+          <Field name="deliveryLocation" required />
+        </>
+      )}
+      <button className="pp-button wide">
+        {view === 'suppliers' ? 'Create supplier' : 'Create RFQ draft'}
+      </button>
+    </form>
+  );
 }
