@@ -404,12 +404,15 @@ runWhenDatabase('PostgreSQL tenant isolation', () => {
         );
         contactIds.push(contact.rows[0].id);
       }
+      await client.query('SAVEPOINT expected_contact_mismatch');
       await expect(
         client.query(
           "INSERT INTO rfq_supplier_invitations(tenant_id,rfq_id,supplier_id,supplier_contact_id,status,expires_at) VALUES($1::uuid,$2::uuid,$3::uuid,$4::uuid,'DRAFT',now()+interval '1 day')",
           [tenantA, rfq.rows[0].id, suppliers.rows[1].id, contactIds[0]],
         ),
-      ).rejects.toThrow();
+      ).rejects.toMatchObject({ code: '23503' });
+      await client.query('ROLLBACK TO SAVEPOINT expected_contact_mismatch');
+      await client.query('RELEASE SAVEPOINT expected_contact_mismatch');
       const quotationIds: string[] = [];
       const invitationIds: string[] = [];
       const lineIds: string[] = [];
