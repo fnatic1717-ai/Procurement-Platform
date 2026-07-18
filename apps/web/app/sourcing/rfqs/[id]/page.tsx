@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
 import {
   Button,
@@ -25,6 +25,7 @@ import {
   listAudit,
   listClarifications,
   listQuotations,
+  getQuotation,
   listSuppliers,
   revokeInvitation,
   transitionRfq,
@@ -40,7 +41,6 @@ import type {
   Quotation,
   RfqDetail,
   RfqLine,
-  RfqStatus,
   Supplier,
 } from '../../../lib/types';
 const text = (v: unknown) => (v == null ? '' : String(v));
@@ -53,7 +53,8 @@ export default function RfqDetailPage() {
   const [audit, setAudit] = useState<PageResult<AuditEvent> | null>(null);
   const [suppliers, setSuppliers] = useState<PageResult<Supplier> | null>(null);
   const [selectedSupplier, setSelectedSupplier] = useState<Supplier | null>(null);
-  const [error, setError] = useState<ApiError | null>(null);
+  const [initialError, setInitialError] = useState<ApiError | null>(null);
+  const [mutationError, setMutationError] = useState<ApiError | null>(null);
   const [busy, setBusy] = useState(true);
   const [mutationBusy, setMutationBusy] = useState(false);
   const idStore = useRef(new IdempotencyStore());
@@ -66,20 +67,13 @@ export default function RfqDetailPage() {
   };
   useEffect(() => {
     refresh()
-      .catch((e) => e instanceof ApiError && setError(e))
+      .catch((e) => e instanceof ApiError && setInitialError(e))
       .finally(() => setBusy(false));
   }, [id]);
-  const actions = useMemo(() => {
-    if (!rfq) return [] as RfqStatus[];
-    const map: Partial<Record<RfqStatus, RfqStatus[]>> = {
-      DRAFT: ['READY_FOR_REVIEW'],
-      READY_FOR_REVIEW: ['PUBLISHED'],
-      PUBLISHED: ['CLARIFICATION_OPEN', 'QUOTATION_OPEN'],
-      CLARIFICATION_OPEN: ['QUOTATION_OPEN'],
-      QUOTATION_OPEN: ['QUOTATION_CLOSED'],
-    };
-    return can('rfqs.publish') ? (map[rfq.status] ?? []) : [];
-  }, [rfq, can]);
+  const actions = useMemo(
+    () => (can('rfqs.publish') ? (rfq?.allowed_transitions ?? []) : []),
+    [rfq, can],
+  );
   async function mutate(
     operation: string,
     payload: Record<string, unknown>,
@@ -90,20 +84,21 @@ export default function RfqDetailPage() {
     const prepared = idempotent ? idStore.current.prepare(operation, payload) : null;
     if (idempotent && !prepared) return;
     setMutationBusy(true);
-    setError(null);
+    setMutationError(null);
     try {
       await fn(idempotent ? { ...payload, idempotencyKey: prepared!.key } : payload);
       if (idempotent) idStore.current.finish(operation, true);
       await refresh();
     } catch (e) {
       if (idempotent) idStore.current.finish(operation, false);
-      if (e instanceof ApiError) setError(e);
+      if (e instanceof ApiError) setMutationError(e);
     } finally {
       setMutationBusy(false);
     }
   }
   if (busy) return <LoadingState label="Loading persisted RFQ workspace" />;
-  if (error) return <ErrorState title={error.kind} description={error.message} />;
+  if (initialError)
+    return <ErrorState title={initialError.kind} description={initialError.message} />;
   if (!rfq)
     return <ErrorState title="Not found" description="The RFQ was not returned by the API." />;
   return (
@@ -111,6 +106,13 @@ export default function RfqDetailPage() {
       <h3>
         {rfq.rfq_number} — {rfq.title}
       </h3>
+      {mutationError && (
+        <section className="pp-state pp-state--error" role="alert">
+          <strong>{mutationError.kind}</strong>
+          <span>{mutationError.message}</span>
+          <Button onClick={() => setMutationError(null)}>Dismiss</Button>
+        </section>
+      )}
       <dl>
         <dt>Status</dt>
         <dd>
@@ -306,6 +308,7 @@ export default function RfqDetailPage() {
         refresh={refresh}
       />
       <Quotations
+        rfqId={rfq.id}
         data={quotations}
         commercial={Boolean(session?.permissions.includes('quotations.read_commercial'))}
       />
@@ -627,7 +630,6 @@ function Clarifications({
                     `clarification-response:${t.id}`,
                     { body: text(fd.get('body')), visibility: text(fd.get('visibility')) },
                     (body) => answerClarification(t.id, body),
-                    false,
                   );
                 }}
               >
@@ -661,12 +663,19 @@ function Clarifications({
   );
 }
 function Quotations({
+  rfqId,
   data,
   commercial,
 }: {
+  rfqId: string;
   data: PageResult<Quotation> | null;
   commercial: boolean;
 }) {
+  const [details, setDetails] = useState<Record<string, Quotation>>({});
+  async function loadDetail(quotationId: string) {
+    const detail = await getQuotation(rfqId, quotationId);
+    setDetails((current) => ({ ...current, [quotationId]: detail }));
+  }
   return (
     <section>
       <h3>Quotations</h3>
@@ -677,12 +686,37 @@ function Quotations({
           <tbody>
             {data.items.map((q) => (
               <tr key={q.id}>
-                <td>{q.quotation_number}</td>
+                <td>
+                  <button className="link" onClick={() => void loadDetail(q.id)}>
+                    {q.quotation_number}
+                  </button>
+                </td>
                 <td>{q.supplierLegalName ?? q.supplier_id}</td>
                 <td>{q.status}</td>
                 <td>{commercial ? q.currency : 'Commercial permission required'}</td>
                 <td>{q.current_revision}</td>
                 <td>{text(q.submitted_at)}</td>
+                {details[q.id] && (
+                  <td colSpan={6}>
+                    <strong>Revision history</strong>
+                    {(details[q.id]?.history ?? []).map((h, index) => (
+                      <p key={index}>
+                        Revision {h.revisionNumber ?? h.revision_number} submitted{' '}
+                        {h.submittedAt ?? h.submitted_at}
+                      </p>
+                    ))}
+                    <strong>Line responses</strong>
+                    {(details[q.id]?.lines ?? []).map((l) => (
+                      <p key={l.id}>
+                        {l.offeredDescription ?? l.offered_description}: {l.quantity}{' '}
+                        {l.unit_of_measure ?? ''} — {l.complianceResponse ?? l.compliance_response}
+                        {commercial
+                          ? ` — unit price ${l.unitPrice ?? l.unit_price ?? 'not set'}`
+                          : ''}
+                      </p>
+                    ))}
+                  </td>
+                )}
               </tr>
             ))}
           </tbody>
@@ -694,7 +728,7 @@ function Quotations({
 function Terms({ rfq }: { rfq: RfqDetail }) {
   return (
     <section>
-      <h3>Files and terms</h3>
+      <h3>Terms</h3>
       <dl>
         <dt>Commercial terms</dt>
         <dd>{rfq.commercial_terms ?? 'Not set'}</dd>
@@ -703,9 +737,43 @@ function Terms({ rfq }: { rfq: RfqDetail }) {
         <dt>Confidentiality instructions</dt>
         <dd>{rfq.confidentiality_instructions ?? 'Not set'}</dd>
       </dl>
+      <h3>Files</h3>
+      <p>No persisted RFQ file links were returned by the current Phase 2B schema.</p>
     </section>
   );
 }
+
+function ReadableState({ value }: { value: unknown }) {
+  if (!value || typeof value !== 'object')
+    return <span>{value == null ? 'Not recorded' : String(value)}</span>;
+  const entries = Object.entries(value as Record<string, unknown>).filter(([key]) =>
+    [
+      'status',
+      'priorStatus',
+      'resultingStatus',
+      'objectId',
+      'objectType',
+      'rfqId',
+      'invitationId',
+      'quotationId',
+      'version',
+      'reason',
+    ].includes(key),
+  );
+  if (entries.length === 0)
+    return <span>State captured; no non-sensitive display fields are available.</span>;
+  return (
+    <dl className="compact-list">
+      {entries.map(([key, nested]) => (
+        <Fragment key={key}>
+          <dt>{key}</dt>
+          <dd>{nested == null ? 'Not recorded' : String(nested)}</dd>
+        </Fragment>
+      ))}
+    </dl>
+  );
+}
+
 function Audit({ data }: { data: PageResult<AuditEvent> | null }) {
   return (
     <section>
@@ -723,6 +791,14 @@ function Audit({ data }: { data: PageResult<AuditEvent> | null }) {
               <span>
                 {a.object_type} {a.object_id}
               </span>
+              <details>
+                <summary>Prior state</summary>
+                <ReadableState value={a.prior_state} />
+              </details>
+              <details>
+                <summary>Resulting state</summary>
+                <ReadableState value={a.resulting_state} />
+              </details>
             </li>
           ))}
         </ol>

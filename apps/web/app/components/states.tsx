@@ -4,10 +4,11 @@ export function AuthState({ loading, error }: { loading: boolean; error: ApiErro
   if (loading) return <LoadingState label="Loading authenticated session" />;
   if (error?.kind === 'unauthorized')
     return (
-      <ErrorState
-        title="Unauthorized"
-        description="Your session has expired or authentication is required."
-      />
+      <section className="pp-state pp-state--error" role="alert">
+        <strong>Signed out</strong>
+        <span>Your session has expired or authentication is required.</span>
+        <a href="/login">Sign in</a>
+      </section>
     );
   if (error?.kind === 'forbidden')
     return (

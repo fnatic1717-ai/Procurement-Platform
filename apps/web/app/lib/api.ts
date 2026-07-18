@@ -65,6 +65,11 @@ export async function api<T>(path: string, init?: RequestInit, signal?: AbortSig
     throw new ApiError('network', 'Network request failed.', e);
   }
 }
+export const login = (body: { tenantId: string; userId?: string }, authorization?: string) => {
+  const init: RequestInit = { method: 'POST', body: JSON.stringify(body) };
+  if (authorization) init.headers = { authorization };
+  return api<Session>('/auth/login', init);
+};
 export const getSession = (signal?: AbortSignal) =>
   api<Session>('/auth/session', undefined, signal);
 export const logout = () => api<{ loggedOut: boolean }>('/auth/logout', { method: 'POST' });
@@ -108,5 +113,7 @@ export const closeClarification = (id: string, body: unknown) =>
   api(`/rfq-clarifications/${id}/close`, { method: 'POST', body: JSON.stringify(body) });
 export const listQuotations = (id: string, signal?: AbortSignal) =>
   api<PageResult<Quotation>>(`/rfqs/${id}/quotations`, undefined, signal);
+export const getQuotation = (rfqId: string, quotationId: string, signal?: AbortSignal) =>
+  api<Quotation>(`/rfqs/${rfqId}/quotations/${quotationId}`, undefined, signal);
 export const listAudit = (id: string, signal?: AbortSignal) =>
   api<PageResult<AuditEvent>>(`/rfqs/${id}/audit`, undefined, signal);

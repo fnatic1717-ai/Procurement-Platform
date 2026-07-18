@@ -4,6 +4,7 @@ Phase 2C-1 implements the internal buyer sourcing workspace against persisted Ph
 
 ## Operational routes
 
+- `/login`: session establishment through `POST /api/v1/auth/login`; development user ID entry is rendered only when `NEXT_PUBLIC_ENABLE_DEVELOPMENT_LOGIN=true`.
 - `/sourcing`: tenant-scoped sourcing overview from `GET /api/v1/rfqs/overview`.
 - `/sourcing/rfqs`: RFQ list from `GET /api/v1/rfqs` with server-side pagination, search, filters, and deterministic sorting.
 - `/sourcing/rfqs/new`: RFQ draft creation through `POST /api/v1/rfqs`.
@@ -54,7 +55,8 @@ Client-side navigation only improves usability. Backend authentication, authoriz
 
 - `API_ORIGIN`: web rewrite target for `/api/:path*`; defaults to `http://localhost:3001`.
 - `PROCUREMENT_SESSION_SECRET`: HMAC secret, at least 32 characters, used to issue and verify signed production/development session cookies.
-- `ENABLE_DEVELOPMENT_LOGIN`: optional non-production-only flag for development session establishment.
+- `ENABLE_DEVELOPMENT_LOGIN`: optional API non-production-only flag for development session establishment.
+- `NEXT_PUBLIC_ENABLE_DEVELOPMENT_LOGIN`: optional web flag that reveals the development-only user ID field on `/login`.
 - `DATABASE_URL`: PostgreSQL connection for API, Prisma, migrations, validation, and integration tests.
 - Existing API and database variables from `.env.example`, `apps/api/.env.example`, and `packages/database/.env.example` still apply.
 

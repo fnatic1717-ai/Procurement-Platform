@@ -81,6 +81,7 @@ export interface RfqDetail extends RfqListItem {
   confidentiality_instructions?: string | null;
   lines: RfqLine[];
   invitations: Invitation[];
+  allowed_transitions?: RfqStatus[];
 }
 export interface SupplierContact {
   id: string;
@@ -124,12 +125,38 @@ export interface Quotation {
   quotation_number: string;
   supplier_id: string;
   supplierLegalName?: string;
+  supplier_legal_name?: string;
   status: string;
   currency?: string;
   total_amount?: string;
   tax_amount?: string;
   submitted_at?: string;
+  withdrawn_at?: string;
+  withdrawal_reason?: string;
   current_revision: number;
+  lines?: QuotationLine[];
+  history?: QuotationRevision[];
+}
+export interface QuotationLine {
+  id: string;
+  rfqLineId?: string;
+  rfq_line_id?: string;
+  offeredDescription?: string;
+  offered_description?: string;
+  quantity?: string;
+  unit_of_measure?: string;
+  unitPrice?: string;
+  unit_price?: string;
+  discount?: string;
+  tax?: string;
+  complianceResponse?: string;
+  compliance_response?: string;
+}
+export interface QuotationRevision {
+  revisionNumber?: number;
+  revision_number?: number;
+  submittedAt?: string;
+  submitted_at?: string;
 }
 export interface AuditEvent {
   id: string;

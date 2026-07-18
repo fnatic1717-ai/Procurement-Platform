@@ -208,6 +208,16 @@ function actor(r: Request) {
   if (!r.principal) throw new BadRequestException('Principal missing');
   return r.principal;
 }
+function allowedRfqTransitions(status: string) {
+  const legal: Record<string, string[]> = {
+    DRAFT: ['READY_FOR_REVIEW'],
+    READY_FOR_REVIEW: ['PUBLISHED'],
+    PUBLISHED: ['CLARIFICATION_OPEN'],
+    CLARIFICATION_OPEN: ['QUOTATION_OPEN'],
+    QUOTATION_OPEN: ['QUOTATION_CLOSED'],
+  };
+  return legal[status] ?? [];
+}
 function one<T>(rows: T[], conflict = false) {
   if (!rows[0]) {
     if (conflict) throw new ConflictException('Version or state conflict');
@@ -458,10 +468,10 @@ export class SourcingService {
       if (q.procurementCategory)
         filters.push(Prisma.sql`procurement_category=${q.procurementCategory}`);
       if (q.createdFrom) filters.push(Prisma.sql`created_at>=${q.createdFrom}::timestamptz`);
-      if (q.createdTo) filters.push(Prisma.sql`created_at<=${q.createdTo}::timestamptz`);
+      if (q.createdTo) filters.push(Prisma.sql`created_at<${q.createdTo}::timestamptz`);
       if (q.deadlineFrom)
         filters.push(Prisma.sql`submission_deadline>=${q.deadlineFrom}::timestamptz`);
-      if (q.deadlineTo) filters.push(Prisma.sql`submission_deadline<=${q.deadlineTo}::timestamptz`);
+      if (q.deadlineTo) filters.push(Prisma.sql`submission_deadline<${q.deadlineTo}::timestamptz`);
       if (q.buyerId) filters.push(Prisma.sql`buyer_id=${q.buyerId}::uuid`);
       const where = filters.length
         ? Prisma.sql`WHERE ${Prisma.join(filters, ' AND ')}`
@@ -810,13 +820,14 @@ export class SourcingService {
     });
   }
   async rfqDetail(p: AuthenticatedPrincipal, id: string) {
-    return this.tx(p, async (tx) =>
-      one(
+    return this.tx(p, async (tx) => {
+      const detail = one(
         await tx.$queryRaw<
-          unknown[]
+          Record<string, unknown>[]
         >`SELECT r.*,COALESCE((SELECT jsonb_agg(to_jsonb(l) ORDER BY line_sequence) FROM rfq_lines l WHERE l.rfq_id=r.id),'[]') lines,COALESCE((SELECT jsonb_agg(to_jsonb(i)||jsonb_build_object('supplierLegalName',s.legal_name,'supplierContactName',c.full_name) ORDER BY i.created_at) FROM rfq_supplier_invitations i JOIN suppliers s ON s.id=i.supplier_id LEFT JOIN supplier_contacts c ON c.id=i.supplier_contact_id WHERE i.rfq_id=r.id),'[]') invitations FROM rfqs r WHERE id=${id}::uuid`,
-      ),
-    );
+      );
+      return { ...detail, allowed_transitions: allowedRfqTransitions(String(detail.status)) };
+    });
   }
   async updateRfq(p: AuthenticatedPrincipal, id: string, d: UpdateRfqDto) {
     return this.tx(p, async (tx) => {
@@ -964,7 +975,7 @@ export class SourcingService {
           const legal: Record<string, string[]> = {
             DRAFT: ['READY_FOR_REVIEW'],
             READY_FOR_REVIEW: ['PUBLISHED'],
-            PUBLISHED: ['CLARIFICATION_OPEN', 'QUOTATION_OPEN'],
+            PUBLISHED: ['CLARIFICATION_OPEN'],
             CLARIFICATION_OPEN: ['QUOTATION_OPEN'],
             QUOTATION_OPEN: ['QUOTATION_CLOSED'],
           };
@@ -1176,14 +1187,29 @@ export class SourcingService {
     });
   }
 
+  async buyerQuotationDetail(p: AuthenticatedPrincipal, rfqId: string, quotationId: string) {
+    return this.tx(p, async (tx) => {
+      const commercial = p.permissions.includes('quotations.read_commercial');
+      const rows = commercial
+        ? await tx.$queryRaw<
+            Record<string, unknown>[]
+          >`SELECT q.*,s.legal_name supplier_legal_name,COALESCE((SELECT jsonb_agg(to_jsonb(l) ORDER BY l.created_at) FROM quotation_lines l WHERE l.quotation_id=q.id),'[]') lines,COALESCE((SELECT jsonb_agg(jsonb_build_object('revisionNumber',r.revision_number,'submittedAt',r.submitted_at) ORDER BY r.revision_number) FROM quotation_revisions r WHERE r.quotation_id=q.id),'[]') history FROM quotations q JOIN suppliers s ON s.id=q.supplier_id WHERE q.id=${quotationId}::uuid AND q.rfq_id=${rfqId}::uuid AND q.status<>'DRAFT'`
+        : await tx.$queryRaw<
+            Record<string, unknown>[]
+          >`SELECT q.id,q.quotation_number,q.supplier_id,q.status,q.submitted_at,q.withdrawn_at,q.withdrawal_reason,q.current_revision,q.version,s.legal_name supplier_legal_name,COALESCE((SELECT jsonb_agg(jsonb_build_object('id',l.id,'rfqLineId',l.rfq_line_id,'offeredDescription',l.offered_description,'quantity',l.quantity,'complianceResponse',l.compliance_response) ORDER BY l.created_at) FROM quotation_lines l WHERE l.quotation_id=q.id),'[]') lines,COALESCE((SELECT jsonb_agg(jsonb_build_object('revisionNumber',r.revision_number,'submittedAt',r.submitted_at) ORDER BY r.revision_number) FROM quotation_revisions r WHERE r.quotation_id=q.id),'[]') history FROM quotations q JOIN suppliers s ON s.id=q.supplier_id WHERE q.id=${quotationId}::uuid AND q.rfq_id=${rfqId}::uuid AND q.status<>'DRAFT'`;
+      return one(rows);
+    });
+  }
+
   async rfqAudit(p: AuthenticatedPrincipal, rfqId: string, q: PageDto) {
     return this.tx(p, async (tx) => {
+      one(await tx.$queryRaw<unknown[]>`SELECT 1 FROM rfqs WHERE id=${rfqId}::uuid`);
       const items = await tx.$queryRaw(
-        Prisma.sql`SELECT id,action,actor_id,actor_type,object_type,object_id,prior_state,resulting_state,created_at FROM audit_events WHERE object_id=${rfqId}::uuid ORDER BY created_at DESC,id DESC LIMIT ${q.limit} OFFSET ${(q.page - 1) * q.limit}`,
+        Prisma.sql`SELECT id,action,actor_id,actor_type,object_type,object_id,prior_state,resulting_state,created_at FROM audit_events WHERE object_id=${rfqId}::uuid AND object_type IN ('rfq','rfq_invitation','rfq_line','clarification','quotation') ORDER BY created_at DESC,id DESC LIMIT ${q.limit} OFFSET ${(q.page - 1) * q.limit}`,
       );
       const total = one(
         await tx.$queryRaw<{ count: number }[]>(
-          Prisma.sql`SELECT count(*)::int count FROM audit_events WHERE object_id=${rfqId}::uuid`,
+          Prisma.sql`SELECT count(*)::int count FROM audit_events WHERE object_id=${rfqId}::uuid AND object_type IN ('rfq','rfq_invitation','rfq_line','clarification','quotation')`,
         ),
       ).count;
       return { items, total, page: q.page, limit: q.limit };
@@ -1604,6 +1630,15 @@ export class SourcingController {
     @Query() q: PageDto,
   ) {
     return this.s.rfqAudit(actor(r), id, q);
+  }
+  @Get('rfqs/:rfqId/quotations/:quotationId')
+  @RequirePermissions('quotations.read')
+  buyerQuotationDetail(
+    @Req() r: Request,
+    @Param('rfqId', ParseUUIDPipe) rfqId: string,
+    @Param('quotationId', ParseUUIDPipe) quotationId: string,
+  ) {
+    return this.s.buyerQuotationDetail(actor(r), rfqId, quotationId);
   }
   @Get('supplier-portal/invitations/:id')
   @RequirePermissions('supplier_portal.rfqs.read_invited')

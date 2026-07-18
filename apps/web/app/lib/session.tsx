@@ -39,7 +39,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       reload,
       logout: async () => {
         await requestLogout();
+        setError(null);
         setSession(null);
+        window.location.assign('/login');
       },
     }),
     [session, loading, error],

@@ -43,7 +43,11 @@ export default function RfqListPage() {
   }, [params]);
   function update(k: string, v: string) {
     const n = new URLSearchParams(params);
-    if (v) n.set(k, v);
+    const value =
+      (k === 'createdTo' || k === 'deadlineTo') && /^\d{4}-\d{2}-\d{2}$/.test(v)
+        ? new Date(`${v}T00:00:00`).toISOString()
+        : v;
+    if (value) n.set(k, value);
     else n.delete(k);
     n.set('page', '1');
     router.push(`/sourcing/rfqs?${n}`);
@@ -88,6 +92,38 @@ export default function RfqListPage() {
           />
         </label>
         <label>
+          Created from
+          <Input
+            type="date"
+            defaultValue={(params.get('createdFrom') ?? '').slice(0, 10)}
+            onBlur={(e) => update('createdFrom', e.target.value)}
+          />
+        </label>
+        <label>
+          Created to
+          <Input
+            type="date"
+            defaultValue={(params.get('createdTo') ?? '').slice(0, 10)}
+            onBlur={(e) =>
+              update(
+                'createdTo',
+                e.target.value
+                  ? new Date(
+                      new Date(`${e.target.value}T00:00:00`).getTime() + 86400000,
+                    ).toISOString()
+                  : '',
+              )
+            }
+          />
+        </label>
+        <label>
+          Buyer
+          <Input
+            defaultValue={params.get('buyerId') ?? ''}
+            onBlur={(e) => update('buyerId', e.target.value)}
+          />
+        </label>
+        <label>
           Deadline from
           <Input
             type="date"
@@ -100,8 +136,39 @@ export default function RfqListPage() {
           <Input
             type="date"
             defaultValue={params.get('deadlineTo') ?? ''}
-            onBlur={(e) => update('deadlineTo', e.target.value)}
+            onBlur={(e) =>
+              update(
+                'deadlineTo',
+                e.target.value
+                  ? new Date(
+                      new Date(`${e.target.value}T00:00:00`).getTime() + 86400000,
+                    ).toISOString()
+                  : '',
+              )
+            }
           />
+        </label>
+        <label>
+          Direction
+          <Select
+            value={params.get('direction') ?? 'desc'}
+            onChange={(e) => update('direction', e.target.value)}
+          >
+            <option value="desc">Descending</option>
+            <option value="asc">Ascending</option>
+          </Select>
+        </label>
+        <label>
+          Page size
+          <Select
+            value={params.get('limit') ?? '25'}
+            onChange={(e) => update('limit', e.target.value)}
+          >
+            <option value="10">10</option>
+            <option value="25">25</option>
+            <option value="50">50</option>
+            <option value="100">100</option>
+          </Select>
         </label>
         <label>
           Sort
