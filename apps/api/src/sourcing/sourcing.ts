@@ -150,6 +150,17 @@ class AnswerDto {
   @IsString() @IsNotEmpty() @MaxLength(8000) body!: string;
   @IsIn(['PRIVATE', 'PUBLIC']) visibility!: 'PRIVATE' | 'PUBLIC';
 }
+class RfqTransitionDto extends CommandDto {
+  @IsIn([
+    'READY_FOR_REVIEW',
+    'PUBLISHED',
+    'CLARIFICATION_OPEN',
+    'QUOTATION_OPEN',
+    'QUOTATION_CLOSED',
+  ])
+  status!:
+    'READY_FOR_REVIEW' | 'PUBLISHED' | 'CLARIFICATION_OPEN' | 'QUOTATION_OPEN' | 'QUOTATION_CLOSED';
+}
 class QuoteDto {
   @Matches(currency) currency!: string;
   @IsDateString() validityDate!: string;
@@ -238,6 +249,7 @@ export class SourcingService {
     type: string,
     id: string,
     result: unknown,
+    prior?: unknown,
   ) {
     return this.audit.append(
       {
@@ -249,6 +261,7 @@ export class SourcingService {
         objectType: type,
         objectId: id,
         resultingState: result,
+        priorState: prior,
       },
       tx,
     );
@@ -287,13 +300,18 @@ export class SourcingService {
   }
   async updateSupplier(p: AuthenticatedPrincipal, id: string, d: UpdateSupplierDto) {
     return this.tx(p, async (tx) => {
+      const prior = one(
+        await tx.$queryRaw<
+          Record<string, unknown>[]
+        >`SELECT * FROM suppliers WHERE id=${id}::uuid FOR UPDATE`,
+      );
       const s = one(
         await tx.$queryRaw<
           Record<string, unknown>[]
         >`UPDATE suppliers SET legal_name=${d.legalName},trading_name=${d.tradingName ?? null},supplier_type=${d.supplierType},country=${d.country},default_currency=${d.defaultCurrency},primary_email=${d.primaryEmail ?? null},primary_phone=${d.primaryPhone ?? null},version=version+1,updated_at=now() WHERE id=${id}::uuid AND version=${d.version} RETURNING *`,
         true,
       );
-      await this.auditOne(tx, p, 'supplier.updated', 'supplier', id, s);
+      await this.auditOne(tx, p, 'supplier.updated', 'supplier', id, s, prior);
       return s;
     });
   }
@@ -365,6 +383,11 @@ export class SourcingService {
         if (!ok[0])
           throw new ConflictException('Qualification and compliance requirements not met');
       }
+      const prior = one(
+        await tx.$queryRaw<
+          Record<string, unknown>[]
+        >`SELECT * FROM suppliers WHERE id=${id}::uuid FOR UPDATE`,
+      );
       const s = one(
         await tx.$queryRaw<
           Record<string, unknown>[]
@@ -373,7 +396,7 @@ export class SourcingService {
       );
       if (status === 'PENDING_QUALIFICATION')
         await tx.$executeRaw`INSERT INTO supplier_qualification_records(tenant_id,supplier_id,qualification_type,status,submitted_at) VALUES(${p.tenantId}::uuid,${id}::uuid,'STANDARD','PENDING',now())`;
-      await this.auditOne(tx, p, `supplier.${status.toLowerCase()}`, 'supplier', id, s);
+      await this.auditOne(tx, p, `supplier.${status.toLowerCase()}`, 'supplier', id, s, prior);
       return s;
     });
   }
@@ -418,7 +441,7 @@ export class SourcingService {
       const i = one(
         await tx.$queryRaw<
           Record<string, unknown>[]
-        >`INSERT INTO rfq_supplier_invitations(tenant_id,rfq_id,supplier_id,supplier_contact_id,expires_at) SELECT ${p.tenantId}::uuid,${id}::uuid,s.id,${d.supplierContactId ?? null}::uuid,${d.expiresAt}::timestamptz FROM suppliers s,rfqs r WHERE s.id=${d.supplierId}::uuid AND r.id=${id}::uuid AND s.status='ACTIVE' AND s.qualification_status='APPROVED' AND r.status IN ('DRAFT','READY_FOR_REVIEW') RETURNING *`,
+        >`INSERT INTO rfq_supplier_invitations(tenant_id,rfq_id,supplier_id,supplier_contact_id,expires_at) SELECT ${p.tenantId}::uuid,${id}::uuid,s.id,c.id,${d.expiresAt}::timestamptz FROM suppliers s JOIN rfqs r ON r.id=${id}::uuid LEFT JOIN supplier_contacts c ON c.id=${d.supplierContactId ?? null}::uuid AND c.supplier_id=s.id AND c.active WHERE s.id=${d.supplierId}::uuid AND ((${d.supplierContactId ?? null}::uuid IS NULL) OR c.id IS NOT NULL) AND s.status='ACTIVE' AND s.qualification_status='APPROVED' AND r.status IN ('DRAFT','READY_FOR_REVIEW') RETURNING *`,
       );
       await this.auditOne(tx, p, 'rfq.invitation_added', 'rfq_invitation', String(i.id), i);
       return i;
@@ -427,14 +450,20 @@ export class SourcingService {
   async publish(p: AuthenticatedPrincipal, id: string, d: CommandDto) {
     return this.tx(p, async (tx) =>
       this.idempotent(tx, p, 'rfq.publish', id, d.idempotencyKey, d, async () => {
+        const prior = one(
+          await tx.$queryRaw<
+            Record<string, unknown>[]
+          >`SELECT * FROM rfqs WHERE id=${id}::uuid FOR UPDATE`,
+        );
         const r = one(
           await tx.$queryRaw<
             Record<string, unknown>[]
-          >`UPDATE rfqs SET status='PUBLISHED',published_at=now(),issue_date=current_date,version=version+1 WHERE id=${id}::uuid AND version=${d.version} AND status IN ('DRAFT','READY_FOR_REVIEW') AND submission_deadline>now() AND EXISTS(SELECT 1 FROM rfq_lines WHERE rfq_id=${id}::uuid) AND EXISTS(SELECT 1 FROM rfq_supplier_invitations WHERE rfq_id=${id}::uuid) RETURNING *`,
+          >`UPDATE rfqs SET status='PUBLISHED',published_at=now(),issue_date=current_date,version=version+1 WHERE id=${id}::uuid AND version=${d.version} AND status IN ('DRAFT','READY_FOR_REVIEW') AND submission_deadline>now() AND EXISTS(SELECT 1 FROM rfq_lines WHERE rfq_id=${id}::uuid) AND EXISTS(SELECT 1 FROM rfq_supplier_invitations i JOIN suppliers s ON s.id=i.supplier_id WHERE i.rfq_id=${id}::uuid AND s.status='ACTIVE' AND s.qualification_status='APPROVED') RETURNING *`,
           true,
         );
-        await tx.$executeRaw`UPDATE rfq_supplier_invitations SET status='SENT',sent_at=now(),version=version+1 WHERE rfq_id=${id}::uuid AND status='DRAFT'`;
-        await this.auditOne(tx, p, 'rfq.published', 'rfq', id, r);
+        await tx.$executeRaw`UPDATE rfq_supplier_invitations i SET status='SENT',sent_at=now(),version=version+1 FROM suppliers s WHERE i.rfq_id=${id}::uuid AND i.status='DRAFT' AND s.id=i.supplier_id AND s.status='ACTIVE' AND s.qualification_status='APPROVED'`;
+        await tx.$executeRaw`UPDATE rfq_supplier_invitations i SET status='REVOKED',version=version+1 FROM suppliers s WHERE i.rfq_id=${id}::uuid AND i.status='DRAFT' AND s.id=i.supplier_id AND (s.status<>'ACTIVE' OR s.qualification_status<>'APPROVED')`;
+        await this.auditOne(tx, p, 'rfq.published', 'rfq', id, r, prior);
         return r;
       }),
     );
@@ -445,7 +474,12 @@ export class SourcingService {
       return tx.$queryRaw`SELECT i.id,i.status,i.expires_at,i.version,r.rfq_number,r.title,r.submission_deadline FROM rfq_supplier_invitations i JOIN rfqs r ON r.id=i.rfq_id WHERE i.supplier_id=${sid}::uuid AND i.status NOT IN ('REVOKED','EXPIRED')`;
     });
   }
-  async invitation(p: AuthenticatedPrincipal, id: string, d: CommandDto, accept: boolean) {
+  async invitation(
+    p: AuthenticatedPrincipal,
+    id: string,
+    d: CommandDto | ReasonDto,
+    accept: boolean,
+  ) {
     return this.tx(p, async (tx) => {
       const sid = await this.supplier(tx, p);
       return this.idempotent(
@@ -455,13 +489,32 @@ export class SourcingService {
         id,
         d.idempotencyKey,
         { ...d, accept },
-        async () =>
-          one(
+        async () => {
+          if (!accept && !('reason' in d))
+            throw new BadRequestException('Decline reason is required');
+          const prior = one(
             await tx.$queryRaw<
-              unknown[]
-            >`UPDATE rfq_supplier_invitations i SET status=${accept ? 'ACCEPTED' : 'DECLINED'}::invitation_status,accepted_at=CASE WHEN ${accept} THEN now() END,declined_at=CASE WHEN ${!accept} THEN now() END,version=version+1 FROM suppliers s WHERE i.id=${id}::uuid AND i.supplier_id=${sid}::uuid AND s.id=i.supplier_id AND s.status='ACTIVE' AND i.version=${d.version} AND i.status IN ('SENT','VIEWED') AND i.expires_at>now() RETURNING i.*`,
+              Record<string, unknown>[]
+            >`SELECT i.* FROM rfq_supplier_invitations i JOIN suppliers s ON s.id=i.supplier_id WHERE i.id=${id}::uuid AND i.supplier_id=${sid}::uuid AND s.status='ACTIVE' AND i.version=${d.version} AND i.status IN ('SENT','VIEWED') AND i.expires_at>now() FOR UPDATE`,
             true,
-          ),
+          );
+          const result = one(
+            await tx.$queryRaw<
+              Record<string, unknown>[]
+            >`UPDATE rfq_supplier_invitations i SET status=${accept ? 'ACCEPTED' : 'DECLINED'}::invitation_status,accepted_at=CASE WHEN ${accept} THEN now() END,declined_at=CASE WHEN ${!accept} THEN now() END,decline_reason=CASE WHEN ${!accept} THEN ${(d as ReasonDto).reason} ELSE decline_reason END,version=version+1 WHERE i.id=${id}::uuid RETURNING i.*`,
+            true,
+          );
+          await this.auditOne(
+            tx,
+            p,
+            accept ? 'rfq.invitation_accepted' : 'rfq.invitation_declined',
+            'rfq_invitation',
+            id,
+            result,
+            prior,
+          );
+          return result;
+        },
       );
     });
   }
@@ -471,9 +524,9 @@ export class SourcingService {
       const t = one(
         await tx.$queryRaw<
           Record<string, unknown>[]
-        >`INSERT INTO rfq_clarification_threads(tenant_id,rfq_id,requesting_supplier_id,visibility,subject) SELECT ${p.tenantId}::uuid,r.id,${sid}::uuid,'PRIVATE',${d.subject} FROM rfqs r JOIN rfq_supplier_invitations i ON i.rfq_id=r.id WHERE r.id=${rfqId}::uuid AND i.supplier_id=${sid}::uuid AND i.status='ACCEPTED' AND r.clarification_deadline>now() RETURNING *`,
+        >`INSERT INTO rfq_clarification_threads(tenant_id,rfq_id,requesting_supplier_id,visibility,subject) SELECT ${p.tenantId}::uuid,r.id,${sid}::uuid,'PRIVATE',${d.subject} FROM rfqs r JOIN rfq_supplier_invitations i ON i.rfq_id=r.id WHERE r.id=${rfqId}::uuid AND i.supplier_id=${sid}::uuid AND i.status='ACCEPTED' AND r.status='CLARIFICATION_OPEN' AND r.clarification_deadline>now() RETURNING *`,
       );
-      await tx.$executeRaw`INSERT INTO rfq_clarification_messages(tenant_id,thread_id,author_id,author_supplier_id,body) VALUES(${p.tenantId}::uuid,${String(t.id)}::uuid,${p.userId}::uuid,${sid}::uuid,${d.body})`;
+      await tx.$executeRaw`INSERT INTO rfq_clarification_messages(tenant_id,thread_id,author_id,author_supplier_id,visibility,body) VALUES(${p.tenantId}::uuid,${String(t.id)}::uuid,${p.userId}::uuid,${sid}::uuid,'PRIVATE',${d.body})`;
       await this.auditOne(tx, p, 'rfq.clarification_question', 'clarification', String(t.id), {
         visibility: 'PRIVATE',
       });
@@ -482,15 +535,33 @@ export class SourcingService {
   }
   async answer(p: AuthenticatedPrincipal, id: string, d: AnswerDto) {
     return this.tx(p, async (tx) => {
-      await tx.$executeRaw`UPDATE rfq_clarification_threads SET visibility=${d.visibility}::clarification_visibility WHERE id=${id}::uuid`;
+      const thread = one(
+        await tx.$queryRaw<
+          Record<string, unknown>[]
+        >`SELECT * FROM rfq_clarification_threads WHERE id=${id}::uuid AND status='OPEN' FOR UPDATE`,
+      );
+      const responseThread =
+        d.visibility === 'PUBLIC'
+          ? one(
+              await tx.$queryRaw<
+                Record<string, unknown>[]
+              >`INSERT INTO rfq_clarification_threads(tenant_id,rfq_id,visibility,subject) VALUES(${p.tenantId}::uuid,${String(thread.rfq_id)}::uuid,'PUBLIC','Public clarification') RETURNING *`,
+            )
+          : thread;
       const m = one(
         await tx.$queryRaw<
           Record<string, unknown>[]
-        >`INSERT INTO rfq_clarification_messages(tenant_id,thread_id,author_id,body) VALUES(${p.tenantId}::uuid,${id}::uuid,${p.userId}::uuid,${d.body}) RETURNING *`,
+        >`INSERT INTO rfq_clarification_messages(tenant_id,thread_id,author_id,visibility,body) VALUES(${p.tenantId}::uuid,${String(responseThread.id)}::uuid,${p.userId}::uuid,${d.visibility}::clarification_visibility,${d.body}) RETURNING *`,
       );
-      await this.auditOne(tx, p, 'rfq.clarification_response', 'clarification', id, {
-        visibility: d.visibility,
-      });
+      await this.auditOne(
+        tx,
+        p,
+        'rfq.clarification_response',
+        'clarification',
+        String(responseThread.id),
+        { visibility: d.visibility, messageId: m.id, sourceThreadId: id },
+        thread,
+      );
       return m;
     });
   }
@@ -500,7 +571,7 @@ export class SourcingService {
       const q = one(
         await tx.$queryRaw<
           Record<string, unknown>[]
-        >`INSERT INTO quotations(tenant_id,quotation_number,rfq_id,supplier_id,currency,validity_date,payment_terms) SELECT ${p.tenantId}::uuid,'QUO-'||substr(gen_random_uuid()::text,1,8),r.id,${sid}::uuid,${d.currency},${d.validityDate}::date,${d.paymentTerms ?? null} FROM rfqs r JOIN rfq_supplier_invitations i ON i.rfq_id=r.id WHERE r.id=${rfqId}::uuid AND i.supplier_id=${sid}::uuid AND i.status='ACCEPTED' AND r.submission_deadline>now() RETURNING *`,
+        >`INSERT INTO quotations(tenant_id,quotation_number,rfq_id,supplier_id,currency,validity_date,payment_terms) SELECT ${p.tenantId}::uuid,'QUO-'||substr(gen_random_uuid()::text,1,8),r.id,${sid}::uuid,${d.currency},${d.validityDate}::date,${d.paymentTerms ?? null} FROM rfqs r JOIN rfq_supplier_invitations i ON i.rfq_id=r.id WHERE r.id=${rfqId}::uuid AND i.supplier_id=${sid}::uuid AND i.status='ACCEPTED' AND r.status='QUOTATION_OPEN' AND r.submission_deadline>now() RETURNING *`,
       );
       await this.auditOne(tx, p, 'quotation.draft_created', 'quotation', String(q.id), {
         supplierId: sid,
@@ -514,7 +585,7 @@ export class SourcingService {
       return one(
         await tx.$queryRaw<
           unknown[]
-        >`INSERT INTO quotation_lines(tenant_id,quotation_id,rfq_id,rfq_line_id,offered_description,quantity,unit_price,discount,tax,compliance_response) SELECT ${p.tenantId}::uuid,q.id,q.rfq_id,${d.rfqLineId}::uuid,${d.offeredDescription},${d.quantity}::numeric,${d.unitPrice}::numeric,${d.discount}::numeric,${d.tax}::numeric,${d.complianceResponse} FROM quotations q JOIN rfqs r ON r.id=q.rfq_id WHERE q.id=${id}::uuid AND q.supplier_id=${sid}::uuid AND q.status='DRAFT' AND r.submission_deadline>now() RETURNING *`,
+        >`INSERT INTO quotation_lines(tenant_id,quotation_id,rfq_id,rfq_line_id,offered_description,quantity,unit_price,discount,tax,compliance_response) SELECT ${p.tenantId}::uuid,q.id,q.rfq_id,${d.rfqLineId}::uuid,${d.offeredDescription},${d.quantity}::numeric,${d.unitPrice}::numeric,${d.discount}::numeric,${d.tax}::numeric,${d.complianceResponse} FROM quotations q JOIN rfqs r ON r.id=q.rfq_id WHERE q.id=${id}::uuid AND q.supplier_id=${sid}::uuid AND q.status='DRAFT' AND r.status='QUOTATION_OPEN' AND r.submission_deadline>now() RETURNING *`,
       );
     });
   }
@@ -547,7 +618,7 @@ export class SourcingService {
           const q = one(
             await tx.$queryRaw<
               Record<string, unknown>[]
-            >`UPDATE quotations q SET status=(CASE WHEN q.current_revision>0 THEN 'REVISED' ELSE ${action} END)::quotation_status,submitted_at=now(),current_revision=current_revision+1,total_amount=x.total,tax_amount=x.tax,version=version+1 FROM (SELECT quotation_id,sum(net_line_amount) total,sum(tax) tax,count(*) n FROM quotation_lines GROUP BY quotation_id)x,rfqs r,suppliers s WHERE q.id=${id}::uuid AND q.id=x.quotation_id AND q.rfq_id=r.id AND q.supplier_id=s.id AND q.supplier_id=${sid}::uuid AND q.version=${d.version} AND q.status='DRAFT'::quotation_status AND s.status='ACTIVE' AND r.submission_deadline>now() AND x.n=(SELECT count(*) FROM rfq_lines WHERE rfq_id=r.id) RETURNING q.*`,
+            >`UPDATE quotations q SET status=(CASE WHEN q.current_revision>0 THEN 'REVISED' ELSE ${action} END)::quotation_status,submitted_at=now(),current_revision=current_revision+1,total_amount=x.total,tax_amount=x.tax,version=version+1 FROM (SELECT quotation_id,sum(net_line_amount) total,sum(tax) tax,count(*) n FROM quotation_lines GROUP BY quotation_id)x,rfqs r,suppliers s WHERE q.id=${id}::uuid AND q.id=x.quotation_id AND q.rfq_id=r.id AND q.supplier_id=s.id AND q.supplier_id=${sid}::uuid AND q.version=${d.version} AND q.status='DRAFT'::quotation_status AND s.status='ACTIVE' AND r.status='QUOTATION_OPEN' AND r.submission_deadline>now() AND x.n=(SELECT count(*) FROM rfq_lines WHERE rfq_id=r.id) RETURNING q.*`,
             true,
           );
           await tx.$executeRaw`INSERT INTO quotation_revisions(tenant_id,quotation_id,revision_number,snapshot,submitted_by) SELECT ${p.tenantId}::uuid,id,current_revision,jsonb_build_object('header',to_jsonb(q),'lines',(SELECT jsonb_agg(to_jsonb(l)) FROM quotation_lines l WHERE l.quotation_id=q.id)),${p.userId}::uuid FROM quotations q WHERE id=${id}::uuid`;
@@ -757,16 +828,26 @@ export class SourcingService {
   async revokeInvitation(p: AuthenticatedPrincipal, rfqId: string, id: string, d: ReasonDto) {
     return this.tx(p, (tx) =>
       this.idempotent(tx, p, 'invitation.revoke', id, d.idempotencyKey, d, async () => {
+        const prior = one(
+          await tx.$queryRaw<
+            Record<string, unknown>[]
+          >`SELECT * FROM rfq_supplier_invitations WHERE id=${id}::uuid AND rfq_id=${rfqId}::uuid FOR UPDATE`,
+        );
         const result = one(
           await tx.$queryRaw<
             Record<string, unknown>[]
           >`UPDATE rfq_supplier_invitations SET status='REVOKED',version=version+1 WHERE id=${id}::uuid AND rfq_id=${rfqId}::uuid AND version=${d.version} AND status NOT IN ('REVOKED','EXPIRED') RETURNING *`,
           true,
         );
-        await this.auditOne(tx, p, 'rfq.invitation_revoked', 'rfq_invitation', id, {
-          ...result,
-          reason: d.reason,
-        });
+        await this.auditOne(
+          tx,
+          p,
+          'rfq.invitation_revoked',
+          'rfq_invitation',
+          id,
+          { ...result, reason: d.reason },
+          prior,
+        );
         return result;
       }),
     );
@@ -804,6 +885,83 @@ export class SourcingService {
       }),
     );
   }
+
+  async transitionRfq(p: AuthenticatedPrincipal, id: string, d: RfqTransitionDto) {
+    return this.tx(p, (tx) =>
+      this.idempotent(
+        tx,
+        p,
+        `rfq.transition.${d.status.toLowerCase()}`,
+        id,
+        d.idempotencyKey,
+        d,
+        async () => {
+          const prior = one(
+            await tx.$queryRaw<
+              Record<string, unknown>[]
+            >`SELECT * FROM rfqs WHERE id=${id}::uuid FOR UPDATE`,
+          );
+          const current = String(prior.status);
+          const now = Date.now();
+          const clarificationDeadline = new Date(String(prior.clarification_deadline)).getTime();
+          const submissionDeadline = new Date(String(prior.submission_deadline)).getTime();
+          const legal: Record<string, string[]> = {
+            DRAFT: ['READY_FOR_REVIEW'],
+            READY_FOR_REVIEW: ['PUBLISHED'],
+            PUBLISHED: ['CLARIFICATION_OPEN', 'QUOTATION_OPEN'],
+            CLARIFICATION_OPEN: ['QUOTATION_OPEN'],
+            QUOTATION_OPEN: ['QUOTATION_CLOSED'],
+          };
+          if (!(legal[current] ?? []).includes(d.status))
+            throw new ConflictException('Illegal RFQ transition');
+          if (d.status === 'READY_FOR_REVIEW') {
+            const ready = one(
+              await tx.$queryRaw<
+                { ready: boolean }[]
+              >`SELECT EXISTS(SELECT 1 FROM rfq_lines WHERE rfq_id=${id}::uuid) AND EXISTS(SELECT 1 FROM rfq_supplier_invitations i JOIN suppliers s ON s.id=i.supplier_id WHERE i.rfq_id=${id}::uuid AND s.status='ACTIVE' AND s.qualification_status='APPROVED') ready`,
+            );
+            if (!ready.ready)
+              throw new ConflictException('RFQ requires at least one line and eligible supplier');
+          }
+          if (
+            (d.status === 'PUBLISHED' || d.status === 'CLARIFICATION_OPEN') &&
+            clarificationDeadline <= now
+          )
+            throw new ConflictException('Clarification deadline has passed');
+          if (d.status === 'QUOTATION_OPEN' && submissionDeadline <= now)
+            throw new ConflictException('Quotation deadline has passed');
+          if (d.status === 'QUOTATION_CLOSED' && submissionDeadline > now)
+            throw new ConflictException('Quotation deadline has not passed');
+          const result = one(
+            await tx.$queryRaw<
+              Record<string, unknown>[]
+            >`UPDATE rfqs SET status=${d.status}::rfq_status,published_at=CASE WHEN ${d.status}='PUBLISHED' THEN COALESCE(published_at,now()) ELSE published_at END,issue_date=CASE WHEN ${d.status}='PUBLISHED' THEN COALESCE(issue_date,current_date) ELSE issue_date END,version=version+1 WHERE id=${id}::uuid AND version=${d.version} RETURNING *`,
+            true,
+          );
+          if (d.status === 'PUBLISHED') {
+            await tx.$executeRaw`UPDATE rfq_supplier_invitations i SET status='SENT',sent_at=COALESCE(sent_at,now()),version=version+1 FROM suppliers s WHERE i.rfq_id=${id}::uuid AND i.status='DRAFT' AND s.id=i.supplier_id AND s.status='ACTIVE' AND s.qualification_status='APPROVED'`;
+            await tx.$executeRaw`UPDATE rfq_supplier_invitations i SET status='REVOKED',version=version+1 FROM suppliers s WHERE i.rfq_id=${id}::uuid AND i.status='DRAFT' AND s.id=i.supplier_id AND (s.status<>'ACTIVE' OR s.qualification_status<>'APPROVED')`;
+          }
+          await this.audit.append(
+            {
+              tenantId: p.tenantId,
+              actorId: p.userId,
+              actorType: p.actorType,
+              correlationId: p.correlationId,
+              action: `rfq.transition.${d.status.toLowerCase()}`,
+              objectType: 'rfq',
+              objectId: id,
+              priorState: prior,
+              resultingState: result,
+            },
+            tx,
+          );
+          return result;
+        },
+      ),
+    );
+  }
+
   async terminal(
     p: AuthenticatedPrincipal,
     id: string,
@@ -821,6 +979,14 @@ export class SourcingService {
           status === 'CANCELLED'
             ? ['DRAFT', 'READY_FOR_REVIEW', 'PUBLISHED', 'CLARIFICATION_OPEN', 'QUOTATION_OPEN']
             : ['QUOTATION_CLOSED'];
+        if (
+          status === 'CLOSED' &&
+          String(prior.status) === 'QUOTATION_OPEN' &&
+          new Date(String(prior.submission_deadline)).getTime() <= Date.now()
+        ) {
+          await tx.$executeRaw`UPDATE rfqs SET status='QUOTATION_CLOSED',version=version+1 WHERE id=${id}::uuid`;
+          prior.status = 'QUOTATION_CLOSED';
+        }
         if (!allowed.includes(String(prior.status)))
           throw new ConflictException('Illegal RFQ transition');
         const result = one(
@@ -864,7 +1030,7 @@ export class SourcingService {
           const result = one(
             await tx.$queryRaw<
               Record<string, unknown>[]
-            >`UPDATE quotations q SET status='DRAFT',version=version+1 FROM rfqs r,suppliers s WHERE q.id=${id}::uuid AND q.supplier_id=${sid}::uuid AND q.version=${d.version} AND q.status IN ('SUBMITTED','REVISED') AND q.rfq_id=r.id AND r.submission_deadline>now() AND q.supplier_id=s.id AND s.status='ACTIVE' RETURNING q.*`,
+            >`UPDATE quotations q SET status='DRAFT',version=version+1 FROM rfqs r,suppliers s WHERE q.id=${id}::uuid AND q.supplier_id=${sid}::uuid AND q.version=${d.version} AND q.status IN ('SUBMITTED','REVISED') AND q.rfq_id=r.id AND r.status='QUOTATION_OPEN' AND r.submission_deadline>now() AND q.supplier_id=s.id AND s.status='ACTIVE' RETURNING q.*`,
             true,
           );
           await this.auditOne(tx, p, 'quotation.revision_started', 'quotation', id, {
@@ -909,10 +1075,21 @@ export class SourcingService {
   async invitationDetail(p: AuthenticatedPrincipal, id: string) {
     return this.tx(p, async (tx) => {
       const sid = await this.supplier(tx, p);
+      const prior = one(
+        await tx.$queryRaw<
+          Record<string, unknown>[]
+        >`SELECT i.* FROM rfq_supplier_invitations i JOIN suppliers s ON s.id=i.supplier_id WHERE i.id=${id}::uuid AND i.supplier_id=${sid}::uuid AND i.status NOT IN ('REVOKED','EXPIRED') AND s.status='ACTIVE' FOR UPDATE`,
+      );
+      const viewed = one(
+        await tx.$queryRaw<
+          unknown[]
+        >`UPDATE rfq_supplier_invitations SET status=CASE WHEN status='SENT' THEN 'VIEWED'::invitation_status ELSE status END,viewed_at=COALESCE(viewed_at,now()),version=CASE WHEN viewed_at IS NULL THEN version+1 ELSE version END WHERE id=${id}::uuid RETURNING *`,
+      );
+      await this.auditOne(tx, p, 'rfq.invitation_viewed', 'rfq_invitation', id, viewed, prior);
       return one(
         await tx.$queryRaw<
           unknown[]
-        >`SELECT i.id,i.status,i.expires_at,i.sent_at,i.viewed_at,i.accepted_at,i.declined_at,i.decline_reason,i.version,r.id rfq_id,r.rfq_number,r.title,r.procurement_category,r.currency,r.submission_deadline,r.clarification_deadline,r.required_by,r.delivery_location,r.commercial_terms,r.payment_terms,r.confidentiality_instructions FROM rfq_supplier_invitations i JOIN rfqs r ON r.id=i.rfq_id WHERE i.id=${id}::uuid AND i.supplier_id=${sid}::uuid AND i.status NOT IN ('REVOKED','EXPIRED')`,
+        >`SELECT i.id,i.status,i.expires_at,i.sent_at,i.viewed_at,i.accepted_at,i.declined_at,i.decline_reason,i.version,r.id rfq_id,r.rfq_number,r.title,r.procurement_category,r.currency,r.submission_deadline,r.clarification_deadline,r.required_by,r.delivery_location,r.commercial_terms,r.payment_terms,r.confidentiality_instructions FROM rfq_supplier_invitations i JOIN rfqs r ON r.id=i.rfq_id WHERE i.id=${id}::uuid AND i.supplier_id=${sid}::uuid`,
       );
     });
   }
@@ -920,7 +1097,7 @@ export class SourcingService {
     return this.tx(p, async (tx) => {
       if (p.actorType === 'supplier_user') {
         const sid = await this.supplier(tx, p);
-        return tx.$queryRaw`SELECT t.id,t.subject,t.visibility,t.status,t.created_at,COALESCE(jsonb_agg(jsonb_build_object('id',m.id,'body',m.body,'publishedAt',m.published_at,'buyerAuthored',m.author_supplier_id IS NULL) ORDER BY m.published_at),'[]') messages FROM rfq_clarification_threads t JOIN rfq_clarification_messages m ON m.thread_id=t.id WHERE t.rfq_id=${rfqId}::uuid AND (t.visibility='PUBLIC' OR t.requesting_supplier_id=${sid}::uuid) AND EXISTS(SELECT 1 FROM rfq_supplier_invitations i WHERE i.rfq_id=t.rfq_id AND i.supplier_id=${sid}::uuid AND i.status IN ('SENT','VIEWED','ACCEPTED')) GROUP BY t.id`;
+        return tx.$queryRaw`SELECT t.id,t.subject,t.visibility,t.status,t.created_at,COALESCE(jsonb_agg(jsonb_build_object('id',m.id,'body',m.body,'visibility',m.visibility,'publishedAt',m.published_at,'buyerAuthored',m.author_supplier_id IS NULL) ORDER BY m.published_at),'[]') messages FROM rfq_clarification_threads t JOIN rfq_clarification_messages m ON m.thread_id=t.id WHERE t.rfq_id=${rfqId}::uuid AND (t.requesting_supplier_id=${sid}::uuid OR (m.visibility='PUBLIC' AND m.author_supplier_id IS NULL)) AND EXISTS(SELECT 1 FROM rfq_supplier_invitations i WHERE i.rfq_id=t.rfq_id AND i.supplier_id=${sid}::uuid AND i.status IN ('SENT','VIEWED','ACCEPTED')) GROUP BY t.id`;
       }
       return tx.$queryRaw`SELECT t.*,COALESCE(jsonb_agg(to_jsonb(m) ORDER BY m.published_at),'[]') messages FROM rfq_clarification_threads t JOIN rfq_clarification_messages m ON m.thread_id=t.id WHERE t.rfq_id=${rfqId}::uuid GROUP BY t.id`;
     });
@@ -945,7 +1122,7 @@ export class SourcingService {
       const result = one(
         await tx.$queryRaw<
           Record<string, unknown>[]
-        >`UPDATE quotations SET currency=${d.currency},validity_date=${d.validityDate}::date,payment_terms=${d.paymentTerms ?? null},version=version+1 WHERE id=${id}::uuid AND supplier_id=${sid}::uuid AND status='DRAFT' AND version=${d.version} RETURNING *`,
+        >`UPDATE quotations SET currency=${d.currency},validity_date=${d.validityDate}::date,payment_terms=${d.paymentTerms ?? null},version=version+1 WHERE id=${id}::uuid AND supplier_id=${sid}::uuid AND status='DRAFT' AND version=${d.version} AND EXISTS(SELECT 1 FROM rfqs r WHERE r.id=quotations.rfq_id AND r.status='QUOTATION_OPEN' AND r.submission_deadline>now()) RETURNING *`,
         true,
       );
       await this.auditOne(tx, p, 'quotation.draft_updated', 'quotation', id, { supplierId: sid });
@@ -963,7 +1140,7 @@ export class SourcingService {
       const result = one(
         await tx.$queryRaw<
           Record<string, unknown>[]
-        >`UPDATE quotation_lines l SET offered_description=${d.offeredDescription},quantity=${d.quantity}::numeric,unit_price=${d.unitPrice}::numeric,discount=${d.discount}::numeric,tax=${d.tax}::numeric,compliance_response=${d.complianceResponse},version=version+1 FROM quotations q,rfqs r WHERE l.id=${id}::uuid AND l.quotation_id=${quotationId}::uuid AND l.version=${d.version} AND q.id=l.quotation_id AND q.supplier_id=${sid}::uuid AND q.status='DRAFT' AND q.rfq_id=r.id AND r.submission_deadline>now() RETURNING l.*`,
+        >`UPDATE quotation_lines l SET offered_description=${d.offeredDescription},quantity=${d.quantity}::numeric,unit_price=${d.unitPrice}::numeric,discount=${d.discount}::numeric,tax=${d.tax}::numeric,compliance_response=${d.complianceResponse},version=version+1 FROM quotations q,rfqs r WHERE l.id=${id}::uuid AND l.quotation_id=${quotationId}::uuid AND l.version=${d.version} AND q.id=l.quotation_id AND q.supplier_id=${sid}::uuid AND q.status='DRAFT' AND q.rfq_id=r.id AND r.status='QUOTATION_OPEN' AND r.submission_deadline>now() RETURNING l.*`,
         true,
       );
       await this.auditOne(tx, p, 'quotation.line_updated', 'quotation_line', id, {
@@ -983,7 +1160,7 @@ export class SourcingService {
       const result = one(
         await tx.$queryRaw<
           Record<string, unknown>[]
-        >`DELETE FROM quotation_lines l USING quotations q WHERE l.id=${id}::uuid AND l.quotation_id=${quotationId}::uuid AND l.version=${version} AND q.id=l.quotation_id AND q.supplier_id=${sid}::uuid AND q.status='DRAFT' RETURNING l.*`,
+        >`DELETE FROM quotation_lines l USING quotations q WHERE l.id=${id}::uuid AND l.quotation_id=${quotationId}::uuid AND l.version=${version} AND q.id=l.quotation_id AND q.supplier_id=${sid}::uuid AND q.status='DRAFT' AND EXISTS(SELECT 1 FROM rfqs r WHERE r.id=q.rfq_id AND r.status='QUOTATION_OPEN' AND r.submission_deadline>now()) RETURNING l.*`,
         true,
       );
       await this.auditOne(tx, p, 'quotation.line_removed', 'quotation_line', id, {
@@ -1096,6 +1273,13 @@ export class SourcingController {
   ) {
     return this.s.invite(actor(r), id, d);
   }
+  @Post('rfqs/:id/transition') @RequirePermissions('rfqs.publish') transition(
+    @Req() r: Request,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() d: RfqTransitionDto,
+  ) {
+    return this.s.transitionRfq(actor(r), id, d);
+  }
   @Post('rfqs/:id/publish') @RequirePermissions('rfqs.publish') publish(
     @Req() r: Request,
     @Param('id', ParseUUIDPipe) id: string,
@@ -1115,7 +1299,7 @@ export class SourcingController {
   }
   @Post('supplier-portal/invitations/:id/decline')
   @RequirePermissions('supplier_portal.invitations.respond')
-  decline(@Req() r: Request, @Param('id', ParseUUIDPipe) id: string, @Body() d: CommandDto) {
+  decline(@Req() r: Request, @Param('id', ParseUUIDPipe) id: string, @Body() d: ReasonDto) {
     return this.s.invitation(actor(r), id, d, false);
   }
   @Post('supplier-portal/rfqs/:id/clarifications')

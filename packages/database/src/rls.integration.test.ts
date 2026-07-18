@@ -396,6 +396,20 @@ runWhenDatabase('PostgreSQL tenant isolation', () => {
         "INSERT INTO rfq_lines(tenant_id,rfq_id,description,item_type,quantity,unit_of_measure,specifications,required_by,delivery_location,category,line_sequence) VALUES($1::uuid,$2::uuid,'Secure endpoint','goods',1,'EA','Managed endpoint',current_date+7,'HQ','IT',1) RETURNING id",
         [tenantA, rfq.rows[0].id],
       );
+      const contactIds: string[] = [];
+      for (const [index, supplier] of suppliers.rows.entries()) {
+        const contact = await client.query(
+          "INSERT INTO supplier_contacts(tenant_id,supplier_id,full_name,contact_type) VALUES($1::uuid,$2::uuid,$3,'sales') RETURNING id",
+          [tenantA, supplier.id, `Contact ${index + 1}`],
+        );
+        contactIds.push(contact.rows[0].id);
+      }
+      await expect(
+        client.query(
+          "INSERT INTO rfq_supplier_invitations(tenant_id,rfq_id,supplier_id,supplier_contact_id,status,expires_at) VALUES($1::uuid,$2::uuid,$3::uuid,$4::uuid,'DRAFT',now()+interval '1 day')",
+          [tenantA, rfq.rows[0].id, suppliers.rows[1].id, contactIds[0]],
+        ),
+      ).rejects.toThrow();
       const quotationIds: string[] = [];
       const invitationIds: string[] = [];
       const lineIds: string[] = [];
@@ -403,8 +417,8 @@ runWhenDatabase('PostgreSQL tenant isolation', () => {
       const fileIds: string[] = [];
       for (const [index, supplier] of suppliers.rows.entries()) {
         const invitation = await client.query(
-          "INSERT INTO rfq_supplier_invitations(tenant_id,rfq_id,supplier_id,status,expires_at) VALUES($1::uuid,$2::uuid,$3::uuid,'ACCEPTED',now()+interval '1 day') RETURNING id",
-          [tenantA, rfq.rows[0].id, supplier.id],
+          "INSERT INTO rfq_supplier_invitations(tenant_id,rfq_id,supplier_id,supplier_contact_id,status,expires_at) VALUES($1::uuid,$2::uuid,$3::uuid,$4::uuid,'ACCEPTED',now()+interval '1 day') RETURNING id",
+          [tenantA, rfq.rows[0].id, supplier.id, contactIds[index]],
         );
         const quotation = await client.query(
           "INSERT INTO quotations(tenant_id,quotation_number,rfq_id,supplier_id,currency,status) VALUES($1::uuid,'Q-'||substr($3::uuid::text,1,8),$2::uuid,$3::uuid,'USD','SUBMITTED') RETURNING id",
@@ -434,6 +448,34 @@ runWhenDatabase('PostgreSQL tenant isolation', () => {
         fileIds.push(file.rows[0].id);
         attachmentIds.push(attachment.rows[0].id);
       }
+      const privateThreadA = await client.query(
+        "INSERT INTO rfq_clarification_threads(tenant_id,rfq_id,requesting_supplier_id,visibility,subject) VALUES($1::uuid,$2::uuid,$3::uuid,'PRIVATE','Private A') RETURNING id",
+        [tenantA, rfq.rows[0].id, suppliers.rows[0].id],
+      );
+      await client.query(
+        "INSERT INTO rfq_clarification_messages(tenant_id,thread_id,author_id,author_supplier_id,visibility,body) VALUES($1::uuid,$2::uuid,$3::uuid,$4::uuid,'PRIVATE','Supplier A private question')",
+        [tenantA, privateThreadA.rows[0].id, supplierUsers.rows[0].id, suppliers.rows[0].id],
+      );
+      await client.query(
+        "INSERT INTO rfq_clarification_messages(tenant_id,thread_id,author_id,visibility,body) VALUES($1::uuid,$2::uuid,$3::uuid,'PRIVATE','Buyer private answer to A')",
+        [tenantA, privateThreadA.rows[0].id, userA],
+      );
+      const publicThread = await client.query(
+        "INSERT INTO rfq_clarification_threads(tenant_id,rfq_id,visibility,subject) VALUES($1::uuid,$2::uuid,'PUBLIC','Public clarification') RETURNING id",
+        [tenantA, rfq.rows[0].id],
+      );
+      await client.query(
+        "INSERT INTO rfq_clarification_messages(tenant_id,thread_id,author_id,visibility,body) VALUES($1::uuid,$2::uuid,$3::uuid,'PUBLIC','Anonymous public clarification')",
+        [tenantA, publicThread.rows[0].id, userA],
+      );
+      const privateThreadB = await client.query(
+        "INSERT INTO rfq_clarification_threads(tenant_id,rfq_id,requesting_supplier_id,visibility,subject) VALUES($1::uuid,$2::uuid,$3::uuid,'PRIVATE','Private B') RETURNING id",
+        [tenantA, rfq.rows[0].id, suppliers.rows[1].id],
+      );
+      await client.query(
+        "INSERT INTO rfq_clarification_messages(tenant_id,thread_id,author_id,author_supplier_id,visibility,body) VALUES($1::uuid,$2::uuid,$3::uuid,$4::uuid,'PRIVATE','Supplier B private question')",
+        [tenantA, privateThreadB.rows[0].id, supplierUsers.rows[1].id, suppliers.rows[1].id],
+      );
       return {
         supplierA: suppliers.rows[0].id,
         supplierB: suppliers.rows[1].id,
@@ -451,6 +493,9 @@ runWhenDatabase('PostgreSQL tenant isolation', () => {
         competingAttachment: attachmentIds[1],
         ownFile: fileIds[0],
         competingFile: fileIds[1],
+        privateThreadA: privateThreadA.rows[0].id,
+        privateThreadB: privateThreadB.rows[0].id,
+        publicThread: publicThread.rows[0].id,
       };
     });
 
@@ -478,6 +523,12 @@ runWhenDatabase('PostgreSQL tenant isolation', () => {
       lines: await client.query('SELECT id FROM quotation_lines'),
       attachments: await client.query('SELECT id,file_object_id FROM quotation_attachments'),
       files: await client.query("SELECT id FROM file_objects WHERE storage_key LIKE 'supplier/%'"),
+      clarificationThreads: await client.query(
+        'SELECT id,requesting_supplier_id FROM rfq_clarification_threads ORDER BY subject',
+      ),
+      clarificationMessages: await client.query(
+        'SELECT body,visibility,author_supplier_id FROM rfq_clarification_messages ORDER BY body',
+      ),
     }));
     expect(own.invitations.rows).toEqual([{ id: seeded.ownInvitation }]);
     expect(own.quotations.rows).toEqual([{ id: seeded.ownQuotation }]);
@@ -486,6 +537,19 @@ runWhenDatabase('PostgreSQL tenant isolation', () => {
       { id: seeded.ownAttachment, file_object_id: seeded.ownFile },
     ]);
     expect(own.files.rows).toEqual([{ id: seeded.ownFile }]);
+    expect(own.clarificationThreads.rows).toEqual([
+      { id: seeded.privateThreadA, requesting_supplier_id: seeded.supplierA },
+      { id: seeded.publicThread, requesting_supplier_id: null },
+    ]);
+    expect(own.clarificationMessages.rows).toEqual([
+      { body: 'Anonymous public clarification', visibility: 'PUBLIC', author_supplier_id: null },
+      { body: 'Buyer private answer to A', visibility: 'PRIVATE', author_supplier_id: null },
+      {
+        body: 'Supplier A private question',
+        visibility: 'PRIVATE',
+        author_supplier_id: seeded.supplierA,
+      },
+    ]);
 
     await expect(
       asPersistedSupplier(() =>
@@ -566,6 +630,14 @@ runWhenDatabase('PostgreSQL tenant isolation', () => {
         ),
       ),
     ).rejects.toMatchObject({ code: '42501' });
+    expect(
+      await asPersistedSupplier(() =>
+        client.query('UPDATE rfq_clarification_threads SET subject=$1 WHERE id=$2::uuid', [
+          'tampered',
+          seeded.privateThreadB,
+        ]),
+      ),
+    ).toMatchObject({ rowCount: 0 });
     await expect(
       asPersistedSupplier(() =>
         client.query(
