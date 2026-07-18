@@ -326,6 +326,56 @@ runWhenDatabase('sourcing PostgreSQL integration', () => {
     ).rejects.toThrow();
   });
 
+  it('filters, sorts and paginates RFQs using the server contract', async () => {
+    const first = await seedRfq('DRAFT');
+    const second = await seedRfq('READY_FOR_REVIEW');
+    await client.query(
+      "UPDATE rfqs SET title='Alpha filtered', procurement_category='metal', submission_deadline=now()+interval '4 days' WHERE id=$1",
+      [first.rfq.id],
+    );
+    await client.query(
+      "UPDATE rfqs SET title='Beta filtered', procurement_category='services', submission_deadline=now()+interval '5 days' WHERE id=$1",
+      [second.rfq.id],
+    );
+    await expect(
+      service.rfqs(principal(), {
+        page: 1,
+        limit: 1,
+        search: 'filtered',
+        status: 'DRAFT',
+        procurementCategory: 'metal',
+        sort: 'title',
+        direction: 'asc',
+      }),
+    ).resolves.toMatchObject({ total: 1, page: 1, limit: 1 });
+    const deadline = await service.rfqs(principal(), {
+      page: 1,
+      limit: 10,
+      deadlineFrom: new Date(Date.now() + 3 * 86400000).toISOString(),
+      sort: 'submission_deadline',
+      direction: 'asc',
+    });
+    expect(deadline.total).toBeGreaterThanOrEqual(2);
+    expect(deadline.items).toBeDefined();
+  });
+
+  it('returns overview counts across all tenant records, not one RFQ page', async () => {
+    for (let index = 0; index < 7; index += 1) await seedRfq('DRAFT');
+    await seedRfq('READY_FOR_REVIEW');
+    await seedRfq('CLARIFICATION_OPEN');
+    await seedRfq('QUOTATION_OPEN');
+    await seedRfq('QUOTATION_CLOSED');
+    const overview = (await service.rfqOverview(principal())) as Record<
+      string,
+      { count: number; records: unknown[] }
+    >;
+    expect(overview.drafts!.count).toBeGreaterThanOrEqual(7);
+    expect(overview.drafts!.records.length).toBeLessThanOrEqual(5);
+    expect(overview.readyForReview!.count).toBeGreaterThanOrEqual(1);
+    expect(overview.readyToClose!.count).toBeGreaterThanOrEqual(1);
+    expect(overview.recentlyUpdated!.records.length).toBeLessThanOrEqual(10);
+  });
+
   it('enforces supplier eligibility from persisted membership and RLS cross-supplier isolation', async () => {
     async function resetSupplierUserMemberships() {
       await client.query(

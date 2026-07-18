@@ -3,6 +3,7 @@ import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { AuditService } from './audit/audit.js';
 import { authProviderFactory, PrincipalLoader } from './auth/auth.js';
+import { SessionController } from './auth/session.js';
 import { AuthenticationGuard } from './auth/auth.guard.js';
 import { AuthorizationGuard } from './authorization/authorization.guard.js';
 import { PolicyService } from './authorization/policy.js';
@@ -21,6 +22,7 @@ import {
   imports: [ThrottlerModule.forRoot([{ ttl: 60_000, limit: 120 }])],
   controllers: [
     HealthController,
+    SessionController,
     PurchaseRequestController,
     ApprovalController,
     IntakeController,

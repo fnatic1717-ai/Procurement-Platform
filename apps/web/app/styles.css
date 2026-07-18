@@ -341,3 +341,54 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 }
+.shell--collapsed {
+  grid-template-columns: 96px 1fr;
+}
+.shell--collapsed aside p,
+.shell--collapsed aside small,
+.shell--collapsed .nav-item small {
+  display: none;
+}
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+}
+.card {
+  background: #fff;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  padding: 18px;
+  display: grid;
+  gap: 8px;
+}
+.card strong {
+  font-size: 28px;
+}
+.link {
+  border: 0;
+  background: transparent;
+  color: var(--color-primary);
+  text-align: left;
+  padding: 4px 0;
+  cursor: pointer;
+}
+.success {
+  color: var(--color-success);
+  background: var(--color-success-bg);
+  border-radius: 8px;
+  padding: 10px;
+}
+pre {
+  white-space: pre-wrap;
+  overflow: auto;
+  background: var(--color-bg-subtle);
+  padding: 12px;
+  border-radius: 8px;
+}
+@media (max-width: 900px) {
+  .shell,
+  .shell--collapsed {
+    grid-template-columns: 1fr;
+  }
+}
