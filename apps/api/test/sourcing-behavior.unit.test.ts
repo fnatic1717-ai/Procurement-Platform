@@ -109,15 +109,18 @@ const tx = {
       }
       return 1;
     }
-    if (sql.includes("UPDATE rfq_supplier_invitations i SET status='SENT'")) {
-      for (const invitation of eligibleDraftInvitations()) invitation.status = 'SENT';
+    if (sql.includes("UPDATE rfq_supplier_invitations SET status='SENT'")) {
+      const ids = args[0] as string[];
+      for (const invitation of state.invitations)
+        if (ids.includes(String(invitation.id)) && invitation.status === 'DRAFT')
+          invitation.status = 'SENT';
       return 1;
     }
-    if (sql.includes("UPDATE rfq_supplier_invitations i SET status='REVOKED'")) {
-      for (const invitation of state.invitations) {
-        if (invitation.status === 'DRAFT' && eligibleDraftInvitations().length === 0)
+    if (sql.includes("UPDATE rfq_supplier_invitations SET status='REVOKED'")) {
+      const ids = args[0] as string[];
+      for (const invitation of state.invitations)
+        if (ids.includes(String(invitation.id)) && invitation.status === 'DRAFT')
           invitation.status = 'REVOKED';
-      }
       return 1;
     }
     return 1;
@@ -128,6 +131,19 @@ const tx = {
       return [state.idempotency.get(selectKey(args))].filter(Boolean);
     }
     if (sql.includes('SELECT * FROM rfqs WHERE id=')) return [{ ...state.rfq }];
+    if (sql.includes('SELECT id FROM rfq_lines WHERE rfq_id=')) {
+      return state.hasLine ? [{ id: rfqLineId }] : [];
+    }
+    if (sql.includes('SELECT i.id,(s.status=')) {
+      return state.invitations
+        .filter((invitation) => invitation.rfq_id === rfqId && invitation.status === 'DRAFT')
+        .map((invitation) => ({
+          id: String(invitation.id),
+          eligible:
+            state.supplier.status === 'ACTIVE' &&
+            state.supplier.qualification_status === 'APPROVED',
+        }));
+    }
     if (sql.includes('SELECT EXISTS(SELECT 1 FROM rfq_lines')) {
       return [{ ready: state.hasLine && eligibleDraftInvitations().length > 0 }];
     }
@@ -179,9 +195,13 @@ const tx = {
   },
 };
 
-vi.mock('@procurement/database', () => ({
-  prisma: { $transaction: (fn: (client: typeof tx) => Promise<unknown>) => fn(tx) },
-}));
+vi.mock(
+  '@procurement/database',
+  () => ({
+    prisma: { $transaction: (fn: (client: typeof tx) => Promise<unknown>) => fn(tx) },
+  }),
+  { virtual: true },
+);
 
 const { SourcingService } = await import('../src/sourcing/sourcing.js');
 
@@ -193,7 +213,7 @@ function service() {
   } as never);
 }
 
-describe('RFQ publication service integration behavior', () => {
+describe('RFQ publication service unit behavior', () => {
   beforeEach(() => resetState());
 
   it('rejects DRAFT to PUBLISHED and allows DRAFT to READY_FOR_REVIEW only with a line and eligible DRAFT invitation', async () => {
@@ -263,7 +283,7 @@ describe('RFQ publication service integration behavior', () => {
   });
 });
 
-describe('RFQ close service integration behavior', () => {
+describe('RFQ close service unit behavior', () => {
   beforeEach(() => resetState());
 
   it('closes from QUOTATION_CLOSED and rejects stale versions', async () => {
@@ -345,7 +365,7 @@ describe('RFQ close service integration behavior', () => {
   });
 });
 
-describe('supplier eligibility service integration behavior', () => {
+describe('supplier eligibility service unit behavior', () => {
   const actions = [
     ['inbox', () => service().inbox(supplierPrincipal)],
     ['detail', () => service().invitationDetail(supplierPrincipal, invitationId)],
