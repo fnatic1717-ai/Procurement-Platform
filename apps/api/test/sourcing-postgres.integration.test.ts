@@ -62,9 +62,9 @@ runWhenDatabase('sourcing PostgreSQL integration', () => {
     client = new Client({ connectionString: testUrl.toString() });
     await client.connect();
     for (const migration of [
-      '../prisma/migrations/0001_platform_foundation/migration.sql',
-      '../prisma/migrations/0002_phase_2a_purchase_requests/migration.sql',
-      '../prisma/migrations/0003_phase_2b_supplier_rfq/migration.sql',
+      '../../../packages/database/prisma/migrations/0001_platform_foundation/migration.sql',
+      '../../../packages/database/prisma/migrations/0002_phase_2a_purchase_requests/migration.sql',
+      '../../../packages/database/prisma/migrations/0003_phase_2b_supplier_rfq/migration.sql',
     ]) {
       await client.query(readFileSync(new URL(migration, import.meta.url), 'utf8'));
     }

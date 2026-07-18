@@ -195,13 +195,9 @@ const tx = {
   },
 };
 
-vi.mock(
-  '@procurement/database',
-  () => ({
-    prisma: { $transaction: (fn: (client: typeof tx) => Promise<unknown>) => fn(tx) },
-  }),
-  { virtual: true },
-);
+vi.mock('@procurement/database', () => ({
+  prisma: { $transaction: (fn: (client: typeof tx) => Promise<unknown>) => fn(tx) },
+}));
 
 const { SourcingService } = await import('../src/sourcing/sourcing.js');
 
