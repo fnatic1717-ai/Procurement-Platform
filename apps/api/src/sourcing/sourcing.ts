@@ -236,7 +236,7 @@ export class SourcingService {
     if (p.actorType !== 'supplier_user') throw new ForbiddenException();
     const rows = await tx.$queryRaw<
       { supplier_id: string }[]
-    >`SELECT supplier_id FROM supplier_user_memberships WHERE user_id=${p.userId}::uuid AND active`;
+    >`SELECT m.supplier_id FROM supplier_user_memberships m JOIN suppliers s ON s.id=m.supplier_id WHERE m.user_id=${p.userId}::uuid AND m.active AND s.status='ACTIVE' AND s.qualification_status='APPROVED'`;
     if (rows.length !== 1)
       throw new ForbiddenException('Active persisted supplier membership required');
     await tx.$executeRaw`SELECT set_config('app.current_supplier_id',${rows[0]!.supplier_id},true)`;
@@ -448,25 +448,7 @@ export class SourcingService {
     });
   }
   async publish(p: AuthenticatedPrincipal, id: string, d: CommandDto) {
-    return this.tx(p, async (tx) =>
-      this.idempotent(tx, p, 'rfq.publish', id, d.idempotencyKey, d, async () => {
-        const prior = one(
-          await tx.$queryRaw<
-            Record<string, unknown>[]
-          >`SELECT * FROM rfqs WHERE id=${id}::uuid FOR UPDATE`,
-        );
-        const r = one(
-          await tx.$queryRaw<
-            Record<string, unknown>[]
-          >`UPDATE rfqs SET status='PUBLISHED',published_at=now(),issue_date=current_date,version=version+1 WHERE id=${id}::uuid AND version=${d.version} AND status IN ('DRAFT','READY_FOR_REVIEW') AND submission_deadline>now() AND EXISTS(SELECT 1 FROM rfq_lines WHERE rfq_id=${id}::uuid) AND EXISTS(SELECT 1 FROM rfq_supplier_invitations i JOIN suppliers s ON s.id=i.supplier_id WHERE i.rfq_id=${id}::uuid AND s.status='ACTIVE' AND s.qualification_status='APPROVED') RETURNING *`,
-          true,
-        );
-        await tx.$executeRaw`UPDATE rfq_supplier_invitations i SET status='SENT',sent_at=now(),version=version+1 FROM suppliers s WHERE i.rfq_id=${id}::uuid AND i.status='DRAFT' AND s.id=i.supplier_id AND s.status='ACTIVE' AND s.qualification_status='APPROVED'`;
-        await tx.$executeRaw`UPDATE rfq_supplier_invitations i SET status='REVOKED',version=version+1 FROM suppliers s WHERE i.rfq_id=${id}::uuid AND i.status='DRAFT' AND s.id=i.supplier_id AND (s.status<>'ACTIVE' OR s.qualification_status<>'APPROVED')`;
-        await this.auditOne(tx, p, 'rfq.published', 'rfq', id, r, prior);
-        return r;
-      }),
-    );
+    return this.transitionRfq(p, id, { ...d, status: 'PUBLISHED' });
   }
   async inbox(p: AuthenticatedPrincipal) {
     return this.tx(p, async (tx) => {
@@ -918,10 +900,34 @@ export class SourcingService {
             const ready = one(
               await tx.$queryRaw<
                 { ready: boolean }[]
-              >`SELECT EXISTS(SELECT 1 FROM rfq_lines WHERE rfq_id=${id}::uuid) AND EXISTS(SELECT 1 FROM rfq_supplier_invitations i JOIN suppliers s ON s.id=i.supplier_id WHERE i.rfq_id=${id}::uuid AND s.status='ACTIVE' AND s.qualification_status='APPROVED') ready`,
+              >`SELECT EXISTS(SELECT 1 FROM rfq_lines WHERE rfq_id=${id}::uuid) AND EXISTS(SELECT 1 FROM rfq_supplier_invitations i JOIN suppliers s ON s.id=i.supplier_id WHERE i.rfq_id=${id}::uuid AND i.status='DRAFT' AND s.status='ACTIVE' AND s.qualification_status='APPROVED') ready`,
             );
             if (!ready.ready)
               throw new ConflictException('RFQ requires at least one line and eligible supplier');
+          }
+          let eligibleDraftInvitationIds: string[] = [];
+          let ineligibleDraftInvitationIds: string[] = [];
+          if (d.status === 'PUBLISHED') {
+            const lockedLines = await tx.$queryRaw<
+              { id: string }[]
+            >`SELECT id FROM rfq_lines WHERE rfq_id=${id}::uuid FOR SHARE`;
+            if (lockedLines.length < 1)
+              throw new ConflictException(
+                'RFQ publication requires at least one line and eligible draft invitation',
+              );
+            const lockedInvitations = await tx.$queryRaw<
+              { id: string; eligible: boolean }[]
+            >`SELECT i.id,(s.status='ACTIVE' AND s.qualification_status='APPROVED') eligible FROM rfq_supplier_invitations i JOIN suppliers s ON s.id=i.supplier_id WHERE i.rfq_id=${id}::uuid AND i.status='DRAFT' FOR UPDATE OF i,s`;
+            eligibleDraftInvitationIds = lockedInvitations
+              .filter((invitation) => invitation.eligible)
+              .map((invitation) => invitation.id);
+            ineligibleDraftInvitationIds = lockedInvitations
+              .filter((invitation) => !invitation.eligible)
+              .map((invitation) => invitation.id);
+            if (eligibleDraftInvitationIds.length < 1)
+              throw new ConflictException(
+                'RFQ publication requires at least one line and eligible draft invitation',
+              );
           }
           if (
             (d.status === 'PUBLISHED' || d.status === 'CLARIFICATION_OPEN') &&
@@ -932,16 +938,17 @@ export class SourcingService {
             throw new ConflictException('Quotation deadline has passed');
           if (d.status === 'QUOTATION_CLOSED' && submissionDeadline > now)
             throw new ConflictException('Quotation deadline has not passed');
+          if (d.status === 'PUBLISHED') {
+            await tx.$executeRaw`UPDATE rfq_supplier_invitations SET status='SENT',sent_at=COALESCE(sent_at,now()),version=version+1 WHERE id=ANY(${eligibleDraftInvitationIds}::uuid[]) AND status='DRAFT'`;
+            if (ineligibleDraftInvitationIds.length > 0)
+              await tx.$executeRaw`UPDATE rfq_supplier_invitations SET status='REVOKED',version=version+1 WHERE id=ANY(${ineligibleDraftInvitationIds}::uuid[]) AND status='DRAFT'`;
+          }
           const result = one(
             await tx.$queryRaw<
               Record<string, unknown>[]
             >`UPDATE rfqs SET status=${d.status}::rfq_status,published_at=CASE WHEN ${d.status}='PUBLISHED' THEN COALESCE(published_at,now()) ELSE published_at END,issue_date=CASE WHEN ${d.status}='PUBLISHED' THEN COALESCE(issue_date,current_date) ELSE issue_date END,version=version+1 WHERE id=${id}::uuid AND version=${d.version} RETURNING *`,
             true,
           );
-          if (d.status === 'PUBLISHED') {
-            await tx.$executeRaw`UPDATE rfq_supplier_invitations i SET status='SENT',sent_at=COALESCE(sent_at,now()),version=version+1 FROM suppliers s WHERE i.rfq_id=${id}::uuid AND i.status='DRAFT' AND s.id=i.supplier_id AND s.status='ACTIVE' AND s.qualification_status='APPROVED'`;
-            await tx.$executeRaw`UPDATE rfq_supplier_invitations i SET status='REVOKED',version=version+1 FROM suppliers s WHERE i.rfq_id=${id}::uuid AND i.status='DRAFT' AND s.id=i.supplier_id AND (s.status<>'ACTIVE' OR s.qualification_status<>'APPROVED')`;
-          }
           await this.audit.append(
             {
               tenantId: p.tenantId,
@@ -979,20 +986,42 @@ export class SourcingService {
           status === 'CANCELLED'
             ? ['DRAFT', 'READY_FOR_REVIEW', 'PUBLISHED', 'CLARIFICATION_OPEN', 'QUOTATION_OPEN']
             : ['QUOTATION_CLOSED'];
+        let effectivePrior = prior;
+        let effectiveVersion = d.version;
         if (
           status === 'CLOSED' &&
           String(prior.status) === 'QUOTATION_OPEN' &&
           new Date(String(prior.submission_deadline)).getTime() <= Date.now()
         ) {
-          await tx.$executeRaw`UPDATE rfqs SET status='QUOTATION_CLOSED',version=version+1 WHERE id=${id}::uuid`;
-          prior.status = 'QUOTATION_CLOSED';
+          const quotationClosed = one(
+            await tx.$queryRaw<
+              Record<string, unknown>[]
+            >`UPDATE rfqs SET status='QUOTATION_CLOSED',version=version+1 WHERE id=${id}::uuid AND version=${d.version} RETURNING *`,
+            true,
+          );
+          await this.audit.append(
+            {
+              tenantId: p.tenantId,
+              actorId: p.userId,
+              actorType: p.actorType,
+              correlationId: p.correlationId,
+              action: 'rfq.transition.quotation_closed',
+              objectType: 'rfq',
+              objectId: id,
+              priorState: prior,
+              resultingState: quotationClosed,
+            },
+            tx,
+          );
+          effectivePrior = quotationClosed;
+          effectiveVersion = Number(quotationClosed.version);
         }
-        if (!allowed.includes(String(prior.status)))
+        if (!allowed.includes(String(effectivePrior.status)))
           throw new ConflictException('Illegal RFQ transition');
         const result = one(
           await tx.$queryRaw<
             Record<string, unknown>[]
-          >`UPDATE rfqs SET status=${status}::rfq_status,cancelled_at=CASE WHEN ${status}='CANCELLED' THEN now() END,cancellation_reason=CASE WHEN ${status}='CANCELLED' THEN ${d.reason} END,closed_at=CASE WHEN ${status}='CLOSED' THEN now() END,version=version+1 WHERE id=${id}::uuid AND version=${d.version} RETURNING *`,
+          >`UPDATE rfqs SET status=${status}::rfq_status,cancelled_at=CASE WHEN ${status}='CANCELLED' THEN now() END,cancellation_reason=CASE WHEN ${status}='CANCELLED' THEN ${d.reason} END,closed_at=CASE WHEN ${status}='CLOSED' THEN now() END,version=version+1 WHERE id=${id}::uuid AND version=${effectiveVersion} RETURNING *`,
           true,
         );
         if (status === 'CANCELLED')
@@ -1006,7 +1035,7 @@ export class SourcingService {
             action: `rfq.${status.toLowerCase()}`,
             objectType: 'rfq',
             objectId: id,
-            priorState: prior,
+            priorState: effectivePrior,
             resultingState: result,
             metadata: { reason: d.reason },
           },
