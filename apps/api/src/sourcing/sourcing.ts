@@ -900,10 +900,21 @@ export class SourcingService {
             const ready = one(
               await tx.$queryRaw<
                 { ready: boolean }[]
-              >`SELECT EXISTS(SELECT 1 FROM rfq_lines WHERE rfq_id=${id}::uuid) AND EXISTS(SELECT 1 FROM rfq_supplier_invitations i JOIN suppliers s ON s.id=i.supplier_id WHERE i.rfq_id=${id}::uuid AND s.status='ACTIVE' AND s.qualification_status='APPROVED') ready`,
+              >`SELECT EXISTS(SELECT 1 FROM rfq_lines WHERE rfq_id=${id}::uuid) AND EXISTS(SELECT 1 FROM rfq_supplier_invitations i JOIN suppliers s ON s.id=i.supplier_id WHERE i.rfq_id=${id}::uuid AND i.status='DRAFT' AND s.status='ACTIVE' AND s.qualification_status='APPROVED') ready`,
             );
             if (!ready.ready)
               throw new ConflictException('RFQ requires at least one line and eligible supplier');
+          }
+          if (d.status === 'PUBLISHED') {
+            const publishable = one(
+              await tx.$queryRaw<
+                { ready: boolean }[]
+              >`SELECT EXISTS(SELECT 1 FROM rfq_lines WHERE rfq_id=${id}::uuid) AND EXISTS(SELECT 1 FROM rfq_supplier_invitations i JOIN suppliers s ON s.id=i.supplier_id WHERE i.rfq_id=${id}::uuid AND i.status='DRAFT' AND s.status='ACTIVE' AND s.qualification_status='APPROVED') ready`,
+            );
+            if (!publishable.ready)
+              throw new ConflictException(
+                'RFQ publication requires at least one line and eligible draft invitation',
+              );
           }
           if (
             (d.status === 'PUBLISHED' || d.status === 'CLARIFICATION_OPEN') &&
