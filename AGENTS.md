@@ -40,7 +40,6 @@ Exclude until architecture review and approval:
 - Add tests for business rules, authorization, tenant isolation, and audit behavior.
 - Never put try/catch blocks around imports.
 
-
 ## Permanent Engineering Rules
 
 - Use `pnpm` as the only package manager. Do not add or use npm, Yarn, Bun, or alternate lockfiles.
