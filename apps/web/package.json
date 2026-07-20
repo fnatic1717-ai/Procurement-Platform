@@ -8,7 +8,9 @@
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --passWithNoTests",
-    "test:integration": "vitest run --passWithNoTests"
+    "test:integration": "vitest run --passWithNoTests",
+    "test:component": "vitest run component.test",
+    "test:browser": "vitest run app/browser-smoke.integration.test.ts"
   },
   "dependencies": {
     "@procurement/ui": "workspace:*",

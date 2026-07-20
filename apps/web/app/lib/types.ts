@@ -181,3 +181,11 @@ export interface RfqOverview {
   readyToClose: OverviewQueue;
   recentlyUpdated: OverviewQueue;
 }
+
+export interface TenantMembershipOption {
+  id: string;
+  tenantId: string;
+  tenantName: string;
+  tenantSlug: string;
+  memberType: string;
+}

@@ -80,6 +80,23 @@ jobs:
         run: |
           set -o pipefail
           pnpm test 2>&1 | tee ci-logs/unit-tests.log
+      - name: Component tests
+        id: component
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          pnpm test:component 2>&1 | tee ci-logs/component-tests.log
+      - name: Browser smoke test
+        id: browser
+        continue-on-error: true
+        env:
+          AUTH_ADAPTER: test-idp
+          TEST_IDP_USER_ID: 11111111-1111-4111-8111-111111111111
+          TEST_IDP_SECRET: ${{ secrets.TEST_IDP_SECRET || 'ci-test-idp-secret-ci-test-idp-secret' }}
+          PROCUREMENT_SESSION_SECRET: ci-procurement-session-secret-ci-procurement
+        run: |
+          set -o pipefail
+          pnpm test:browser 2>&1 | tee ci-logs/browser-smoke.log
       - name: Integration tests
         id: integration
         continue-on-error: true
@@ -171,6 +188,8 @@ jobs:
           typecheck=${{ steps.typecheck.outcome }}
           unit_tests=${{ steps.test.outcome }}
           integration_tests=${{ steps.integration.outcome }}
+          component_tests=${{ steps.component.outcome }}
+          browser_smoke=${{ steps.browser.outcome }}
           build=${{ steps.build.outcome }}
           database_validation=${{ steps.dbvalidate.outcome }}
           dependency_audit=${{ steps.audit.outcome }}
@@ -188,6 +207,6 @@ jobs:
       - name: Final quality gate
         if: always()
         run: |
-          if grep -Eq '^(migration|format|lint|typecheck|unit_tests|integration_tests|build|database_validation|dependency_audit|secret_scan)=(failure|cancelled|skipped)$' ci-logs/quality-summary.txt; then
+          if grep -Eq '^(migration|format|lint|typecheck|unit_tests|integration_tests|component_tests|browser_smoke|build|database_validation|dependency_audit|secret_scan)=(failure|cancelled|skipped)$' ci-logs/quality-summary.txt; then
             exit 1
           fi
