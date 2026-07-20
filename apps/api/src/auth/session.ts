@@ -14,11 +14,12 @@ import { prisma } from '@procurement/database';
 import type { Request, Response } from 'express';
 import { IsOptional, IsUUID } from 'class-validator';
 import { Public } from '../decorators/public.js';
-import { AUTH_PROVIDER, type AuthProvider, PrincipalLoader } from './auth.js';
+import { AUTH_PROVIDER, type AuthProvider, pkceChallenge, PrincipalLoader } from './auth.js';
 import { Inject } from '@nestjs/common';
 
 const cookieName = 'procurement_session';
 const ssoCookieName = 'procurement_sso';
+const ssoStateCookieName = 'procurement_sso_state';
 const maxAgeSeconds = 8 * 60 * 60;
 
 class LoginDto {
@@ -50,6 +51,16 @@ interface SignedSsoPayload {
 interface SignedSsoCookie extends SignedSsoPayload {
   signature: string;
 }
+interface SignedSsoStatePayload {
+  state: string;
+  nonce: string;
+  pkceVerifier: string;
+  iat: number;
+  exp: number;
+}
+interface SignedSsoStateCookie extends SignedSsoStatePayload {
+  signature: string;
+}
 
 function secret() {
   const value = process.env.PROCUREMENT_SESSION_SECRET;
@@ -58,7 +69,7 @@ function secret() {
   return value;
 }
 
-function signPayload(payload: SignedSessionPayload | SignedSsoPayload) {
+function signPayload(payload: SignedSessionPayload | SignedSsoPayload | SignedSsoStatePayload) {
   return createHmac('sha256', secret()).update(canonical(payload)).digest('hex');
 }
 
@@ -80,6 +91,33 @@ export function issueSessionCookie(payload: SignedSessionPayload) {
 function issueSsoCookie(payload: SignedSsoPayload) {
   const signed: SignedSsoCookie = { ...payload, signature: signPayload(payload) };
   return Buffer.from(JSON.stringify(signed), 'utf8').toString('base64url');
+}
+function issueSsoStateCookie(payload: SignedSsoStatePayload) {
+  const signed: SignedSsoStateCookie = { ...payload, signature: signPayload(payload) };
+  return Buffer.from(JSON.stringify(signed), 'utf8').toString('base64url');
+}
+function verifySsoStateCookie(value: string | undefined, now = Math.floor(Date.now() / 1000)) {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(
+      Buffer.from(decodeURIComponent(value), 'base64url').toString('utf8'),
+    ) as SignedSsoStateCookie;
+    const { signature, ...payload } = parsed;
+    if (!payload.state || !payload.nonce || !payload.pkceVerifier) return null;
+    if (!Number.isInteger(payload.iat) || !Number.isInteger(payload.exp) || payload.exp <= now)
+      return null;
+    const expected = signPayload(payload);
+    const actualBuffer = Buffer.from(signature ?? '');
+    const expectedBuffer = Buffer.from(expected);
+    if (
+      actualBuffer.length !== expectedBuffer.length ||
+      !timingSafeEqual(actualBuffer, expectedBuffer)
+    )
+      return null;
+    return payload;
+  } catch {
+    return null;
+  }
 }
 function verifySsoCookie(value: string | undefined, now = Math.floor(Date.now() / 1000)) {
   if (!value) return null;
@@ -161,33 +199,52 @@ export class SessionController {
 
   @Public()
   @Get('sso/start')
-  async ssoStart(@Res({ passthrough: true }) response: Response) {
+  async ssoStart(@Res() response: Response) {
     if (!this.provider.authorizationUrl)
       throw new UnauthorizedException('Production SSO is not configured');
     const state = randomBytes(24).toString('base64url');
-    response.cookie('procurement_sso_state', state, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
-      path: '/',
-      maxAge: 10 * 60 * 1000,
+    const nonce = randomBytes(24).toString('base64url');
+    const pkceVerifier = randomBytes(32).toString('base64url');
+    const now = Math.floor(Date.now() / 1000);
+    const redirectTo = this.provider.authorizationUrl({
+      state,
+      nonce,
+      codeChallenge: pkceChallenge(pkceVerifier),
     });
-    return { redirectTo: this.provider.authorizationUrl(state) };
+    response.cookie(
+      ssoStateCookieName,
+      issueSsoStateCookie({ state, nonce, pkceVerifier, iat: now, exp: now + 600 }),
+      {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'lax',
+        path: '/',
+        maxAge: 10 * 60 * 1000,
+      },
+    );
+    return response.redirect(302, redirectTo);
   }
 
   @Public()
   @Get('sso/callback')
   async ssoCallback(
     @Req() request: Request,
-    @Res({ passthrough: true }) response: Response,
+    @Res() response: Response,
     @Query() query: Record<string, unknown>,
   ) {
-    const expectedState = readCookie(request.header('cookie'), 'procurement_sso_state');
-    if (!expectedState || expectedState !== String(query.state ?? ''))
+    const ssoState = verifySsoStateCookie(readCookie(request.header('cookie'), ssoStateCookieName));
+    if (!ssoState || ssoState.state !== String(query.state ?? '')) {
+      response.clearCookie(ssoStateCookieName, { path: '/' });
       throw new UnauthorizedException('Invalid SSO state');
+    }
     if (!this.provider.callback)
       throw new UnauthorizedException('Production SSO is not configured');
-    const authenticated = await this.provider.callback(query);
+    response.clearCookie(ssoStateCookieName, { path: '/' });
+    const authenticated = await this.provider.callback({
+      query,
+      expectedNonce: ssoState.nonce,
+      pkceVerifier: ssoState.pkceVerifier,
+    });
     const now = Math.floor(Date.now() / 1000);
     response.cookie(ssoCookieName, issueSsoCookie({ ...authenticated, iat: now, exp: now + 600 }), {
       httpOnly: true,
@@ -196,8 +253,7 @@ export class SessionController {
       path: '/',
       maxAge: 10 * 60 * 1000,
     });
-    response.clearCookie('procurement_sso_state', { path: '/' });
-    return { authenticated: true, redirectTo: '/login' };
+    return response.redirect(302, '/login');
   }
 
   @Public()
@@ -235,11 +291,7 @@ export class SessionController {
 
   @Public()
   @Post('login')
-  async login(
-    @Req() request: Request,
-    @Res({ passthrough: true }) response: Response,
-    @Body() body: LoginDto,
-  ) {
+  async login(@Req() request: Request, @Res() response: Response, @Body() body: LoginDto) {
     const devLoginEnabled =
       process.env.ENABLE_DEVELOPMENT_LOGIN === 'true' && process.env.NODE_ENV !== 'production';
     const authorization = request.header('authorization');
