@@ -1,8 +1,8 @@
 'use client';
-import { FormEvent, useState } from 'react';
+import { FormEvent, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button, ErrorState, Input, Select } from '@procurement/ui';
-import { ApiError, discoverMemberships, login } from '../lib/api';
+import { ApiError, discoverMemberships, login, startSso } from '../lib/api';
 import type { TenantMembershipOption } from '../lib/types';
 const text = (value: FormDataEntryValue | null) => (value == null ? '' : String(value));
 export default function LoginPage() {
@@ -14,6 +14,29 @@ export default function LoginPage() {
   const developmentLogin =
     process.env.NEXT_PUBLIC_ENABLE_DEVELOPMENT_LOGIN === 'true' &&
     process.env.NODE_ENV !== 'production';
+  useEffect(() => {
+    if (developmentLogin) return;
+    let active = true;
+    discoverMemberships({})
+      .then((result) => {
+        if (active) setMemberships(result.memberships);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [developmentLogin]);
+  async function startProductionSso() {
+    setError(null);
+    setBusy(true);
+    try {
+      const result = await startSso();
+      window.location.assign(result.redirectTo);
+    } catch (e) {
+      if (e instanceof ApiError) setError(e);
+      setBusy(false);
+    }
+  }
   async function discover(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
@@ -61,17 +84,24 @@ export default function LoginPage() {
       {memberships.length === 0 ? (
         <form className="request-form" onSubmit={discover}>
           {developmentLogin ? (
-            <label>
-              Development user ID
-              <Input name="userId" required />
-            </label>
+            <>
+              <label>
+                Development user ID
+                <Input name="userId" required />
+              </label>
+              <Button disabled={busy}>{busy ? 'Authenticating' : 'Authenticate'}</Button>
+            </>
           ) : (
-            <p>
-              Production sign-in uses the configured SSO identity-provider flow. If SSO is not
-              configured, access fails closed.
-            </p>
+            <>
+              <p>
+                Production sign-in uses the configured SSO identity-provider flow. If SSO is not
+                configured, access fails closed.
+              </p>
+              <Button type="button" disabled={busy} onClick={() => void startProductionSso()}>
+                {busy ? 'Starting SSO' : 'Continue with SSO'}
+              </Button>
+            </>
           )}
-          <Button disabled={busy}>{busy ? 'Authenticating' : 'Authenticate'}</Button>
         </form>
       ) : (
         <form className="request-form" onSubmit={select}>

@@ -14,7 +14,9 @@
     "db:generate": "pnpm --filter @procurement/database prisma generate",
     "db:migrate": "pnpm --filter @procurement/database prisma migrate deploy",
     "db:validate": "pnpm --filter @procurement/database prisma validate",
-    "audit:deps": "pnpm audit --audit-level high"
+    "audit:deps": "pnpm audit --audit-level high",
+    "test:component": "pnpm --filter @procurement/web test:component",
+    "test:browser": "pnpm --filter @procurement/web test:browser"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",

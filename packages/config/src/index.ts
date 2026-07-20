@@ -8,7 +8,7 @@ export const envSchema = z
     REDIS_URL: z.string().url(),
     AUTH0_DOMAIN: z.string().optional(),
     AUTH0_AUDIENCE: z.string().optional(),
-    AUTH_ADAPTER: z.enum(['auth0', 'development']).default('development'),
+    AUTH_ADAPTER: z.enum(['auth0', 'development', 'test-idp']).default('development'),
     CORS_ORIGIN: z.string().default('http://localhost:3000'),
     LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   })

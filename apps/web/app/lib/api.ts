@@ -66,6 +66,7 @@ export async function api<T>(path: string, init?: RequestInit, signal?: AbortSig
     throw new ApiError('network', 'Network request failed.', e);
   }
 }
+export const startSso = () => api<{ redirectTo: string }>('/auth/sso/start');
 export const discoverMemberships = (body: { userId?: string }, authorization?: string) => {
   const init: RequestInit = { method: 'POST', body: JSON.stringify(body) };
   if (authorization) init.headers = { authorization };
