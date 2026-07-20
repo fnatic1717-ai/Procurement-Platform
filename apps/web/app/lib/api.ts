@@ -8,6 +8,7 @@ import type {
   RfqOverview,
   Session,
   Supplier,
+  TenantMembershipOption,
 } from './types';
 export type ApiErrorKind =
   | 'unauthorized'
@@ -65,6 +66,11 @@ export async function api<T>(path: string, init?: RequestInit, signal?: AbortSig
     throw new ApiError('network', 'Network request failed.', e);
   }
 }
+export const discoverMemberships = (body: { userId?: string }, authorization?: string) => {
+  const init: RequestInit = { method: 'POST', body: JSON.stringify(body) };
+  if (authorization) init.headers = { authorization };
+  return api<{ userId: string; memberships: TenantMembershipOption[] }>('/auth/memberships', init);
+};
 export const login = (body: { tenantId: string; userId?: string }, authorization?: string) => {
   const init: RequestInit = { method: 'POST', body: JSON.stringify(body) };
   if (authorization) init.headers = { authorization };
@@ -73,6 +79,19 @@ export const login = (body: { tenantId: string; userId?: string }, authorization
 export const getSession = (signal?: AbortSignal) =>
   api<Session>('/auth/session', undefined, signal);
 export const logout = () => api<{ loggedOut: boolean }>('/auth/logout', { method: 'POST' });
+
+export function updateRfqListQuery(current: URLSearchParams, key: string, rawValue: string) {
+  const next = new URLSearchParams(current);
+  const value =
+    (key === 'createdTo' || key === 'deadlineTo') && /^\d{4}-\d{2}-\d{2}$/.test(rawValue)
+      ? new Date(`${rawValue}T00:00:00`).toISOString()
+      : rawValue;
+  if (value) next.set(key, value);
+  else next.delete(key);
+  if (key === 'page') next.set('page', value || '1');
+  else next.set('page', '1');
+  return next;
+}
 export const listRfqs = (q: URLSearchParams, signal?: AbortSignal) =>
   api<PageResult<RfqListItem>>(`/rfqs?${q}`, undefined, signal);
 export const getOverview = (signal?: AbortSignal) =>

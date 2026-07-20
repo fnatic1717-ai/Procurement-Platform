@@ -1204,12 +1204,19 @@ export class SourcingService {
   async rfqAudit(p: AuthenticatedPrincipal, rfqId: string, q: PageDto) {
     return this.tx(p, async (tx) => {
       one(await tx.$queryRaw<unknown[]>`SELECT 1 FROM rfqs WHERE id=${rfqId}::uuid`);
+      const relatedPredicate = Prisma.sql`(
+        (audit_events.object_type='rfq' AND audit_events.object_id=${rfqId}::uuid)
+        OR (audit_events.object_type='rfq_line' AND EXISTS (SELECT 1 FROM rfq_lines l WHERE l.id=audit_events.object_id AND l.rfq_id=${rfqId}::uuid AND l.tenant_id=audit_events.tenant_id))
+        OR (audit_events.object_type='rfq_invitation' AND EXISTS (SELECT 1 FROM rfq_supplier_invitations i WHERE i.id=audit_events.object_id AND i.rfq_id=${rfqId}::uuid AND i.tenant_id=audit_events.tenant_id))
+        OR (audit_events.object_type='clarification' AND EXISTS (SELECT 1 FROM rfq_clarification_threads c WHERE c.id=audit_events.object_id AND c.rfq_id=${rfqId}::uuid AND c.tenant_id=audit_events.tenant_id))
+        OR (audit_events.object_type='quotation' AND EXISTS (SELECT 1 FROM quotations qn WHERE qn.id=audit_events.object_id AND qn.rfq_id=${rfqId}::uuid AND qn.tenant_id=audit_events.tenant_id))
+      )`;
       const items = await tx.$queryRaw(
-        Prisma.sql`SELECT id,action,actor_id,actor_type,object_type,object_id,prior_state,resulting_state,created_at FROM audit_events WHERE object_id=${rfqId}::uuid AND object_type IN ('rfq','rfq_invitation','rfq_line','clarification','quotation') ORDER BY created_at DESC,id DESC LIMIT ${q.limit} OFFSET ${(q.page - 1) * q.limit}`,
+        Prisma.sql`SELECT id,action,actor_id,actor_type,object_type,object_id,prior_state,resulting_state,created_at FROM audit_events WHERE ${relatedPredicate} ORDER BY created_at DESC,id DESC LIMIT ${q.limit} OFFSET ${(q.page - 1) * q.limit}`,
       );
       const total = one(
         await tx.$queryRaw<{ count: number }[]>(
-          Prisma.sql`SELECT count(*)::int count FROM audit_events WHERE object_id=${rfqId}::uuid AND object_type IN ('rfq','rfq_invitation','rfq_line','clarification','quotation')`,
+          Prisma.sql`SELECT count(*)::int count FROM audit_events WHERE ${relatedPredicate}`,
         ),
       ).count;
       return { items, total, page: q.page, limit: q.limit };

@@ -3,6 +3,7 @@ import { FormEvent, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button, ErrorState, Input } from '@procurement/ui';
 import { ApiError, createRfq } from '../../../lib/api';
+import { PermissionGate } from '../../../components/permission-gate';
 import { validateRfqDraft } from '../../../lib/validation';
 const v = (fd: FormData, k: string) => String(fd.get(k) ?? '');
 export default function NewRfqPage() {
@@ -32,31 +33,37 @@ export default function NewRfqPage() {
     }
   }
   return (
-    <form className="request-form" onSubmit={submit} noValidate>
-      {apiError && <ErrorState title={apiError.kind} description={apiError.message} />}{' '}
-      {[
-        'title',
-        'procurementCategory',
-        'currency',
-        'clarificationDeadline',
-        'submissionDeadline',
-        'requiredBy',
-        'deliveryLocation',
-      ].map((name) => (
-        <label key={name}>
-          {name.replace(/([A-Z])/g, ' $1')}
-          <Input
-            name={name}
-            type={
-              name.includes('Deadline') ? 'datetime-local' : name === 'requiredBy' ? 'date' : 'text'
-            }
-            defaultValue={name === 'currency' ? 'USD' : ''}
-            aria-invalid={Boolean(errors[name])}
-          />
-          {errors[name] && <span className="field-error">{errors[name]}</span>}
-        </label>
-      ))}
-      <Button>Save RFQ draft</Button>
-    </form>
+    <PermissionGate permission="rfqs.create">
+      <form className="request-form" onSubmit={submit} noValidate>
+        {apiError && <ErrorState title={apiError.kind} description={apiError.message} />}{' '}
+        {[
+          'title',
+          'procurementCategory',
+          'currency',
+          'clarificationDeadline',
+          'submissionDeadline',
+          'requiredBy',
+          'deliveryLocation',
+        ].map((name) => (
+          <label key={name}>
+            {name.replace(/([A-Z])/g, ' $1')}
+            <Input
+              name={name}
+              type={
+                name.includes('Deadline')
+                  ? 'datetime-local'
+                  : name === 'requiredBy'
+                    ? 'date'
+                    : 'text'
+              }
+              defaultValue={name === 'currency' ? 'USD' : ''}
+              aria-invalid={Boolean(errors[name])}
+            />
+            {errors[name] && <span className="field-error">{errors[name]}</span>}
+          </label>
+        ))}
+        <Button>Save RFQ draft</Button>
+      </form>
+    </PermissionGate>
   );
 }

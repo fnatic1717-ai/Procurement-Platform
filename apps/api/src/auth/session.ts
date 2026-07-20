@@ -24,6 +24,10 @@ class LoginDto {
   @IsOptional() @IsUUID() userId?: string;
 }
 
+class MembershipsDto {
+  @IsOptional() @IsUUID() userId?: string;
+}
+
 interface SignedSessionPayload {
   userId: string;
   tenantId: string;
@@ -108,6 +112,37 @@ export class SessionController {
     @Inject(AUTH_PROVIDER) private readonly provider: AuthProvider,
     private readonly principalLoader: PrincipalLoader,
   ) {}
+
+  @Public()
+  @Post('memberships')
+  async memberships(@Req() request: Request, @Body() body: MembershipsDto) {
+    const devLoginEnabled =
+      process.env.ENABLE_DEVELOPMENT_LOGIN === 'true' && process.env.NODE_ENV !== 'production';
+    const authorization = request.header('authorization');
+    if (!authorization?.startsWith('Bearer ') && !devLoginEnabled)
+      throw new UnauthorizedException('Production SSO is not configured for membership discovery');
+    const authenticated = authorization?.startsWith('Bearer ')
+      ? await this.provider.authenticate(authorization)
+      : body.userId
+        ? { userId: body.userId, subject: `development-login|${body.userId}` }
+        : null;
+    if (!authenticated) throw new UnauthorizedException('Authentication failed');
+    const rows = await prisma.tenantMembership.findMany({
+      where: { userId: authenticated.userId, status: 'active' },
+      include: { tenant: true },
+      orderBy: [{ tenant: { name: 'asc' } }, { id: 'asc' }],
+    });
+    return {
+      userId: authenticated.userId,
+      memberships: rows.map((m: (typeof rows)[number]) => ({
+        id: m.id,
+        tenantId: m.tenantId,
+        tenantName: m.tenant.name,
+        tenantSlug: m.tenant.slug,
+        memberType: m.memberType,
+      })),
+    };
+  }
 
   @Public()
   @Post('login')

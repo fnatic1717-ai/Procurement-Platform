@@ -11,7 +11,7 @@ import {
   StatusBadge,
   Table,
 } from '@procurement/ui';
-import { ApiError, listRfqs } from '../../lib/api';
+import { ApiError, listRfqs, updateRfqListQuery } from '../../lib/api';
 import type { PageResult, RfqListItem } from '../../lib/types';
 import { NoRecords } from '../../components/states';
 const tone = (s: string) =>
@@ -42,14 +42,7 @@ export default function RfqListPage() {
     return () => c.abort();
   }, [params]);
   function update(k: string, v: string) {
-    const n = new URLSearchParams(params);
-    const value =
-      (k === 'createdTo' || k === 'deadlineTo') && /^\d{4}-\d{2}-\d{2}$/.test(v)
-        ? new Date(`${v}T00:00:00`).toISOString()
-        : v;
-    if (value) n.set(k, value);
-    else n.delete(k);
-    n.set('page', '1');
+    const n = updateRfqListQuery(params, k, v);
     router.push(`/sourcing/rfqs?${n}`);
   }
   if (error) return <ErrorState title={error.kind} description={error.message} />;

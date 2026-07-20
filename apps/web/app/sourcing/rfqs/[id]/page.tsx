@@ -34,6 +34,7 @@ import {
 } from '../../../lib/api';
 import { IdempotencyStore } from '../../../lib/idempotency';
 import { useSession } from '../../../lib/session';
+import { PermissionGate } from '../../../components/permission-gate';
 import type {
   AuditEvent,
   ClarificationThread,
@@ -46,7 +47,7 @@ import type {
 const text = (v: unknown) => (v == null ? '' : String(v));
 export default function RfqDetailPage() {
   const { id } = useParams<{ id: string }>();
-  const { can, session } = useSession();
+  const { can, session, loading: sessionLoading } = useSession();
   const [rfq, setRfq] = useState<RfqDetail | null>(null);
   const [quotations, setQuotations] = useState<PageResult<Quotation> | null>(null);
   const [clarifications, setClarifications] = useState<ClarificationThread[]>([]);
@@ -57,6 +58,7 @@ export default function RfqDetailPage() {
   const [mutationError, setMutationError] = useState<ApiError | null>(null);
   const [busy, setBusy] = useState(true);
   const [mutationBusy, setMutationBusy] = useState(false);
+  const mutationLock = useRef(false);
   const idStore = useRef(new IdempotencyStore());
   const refresh = async () => {
     const r = await getRfq(id);
@@ -66,10 +68,14 @@ export default function RfqDetailPage() {
     setAudit(await listAudit(id));
   };
   useEffect(() => {
+    if (sessionLoading || !session || !can('rfqs.read')) {
+      setBusy(false);
+      return;
+    }
     refresh()
       .catch((e) => e instanceof ApiError && setInitialError(e))
       .finally(() => setBusy(false));
-  }, [id]);
+  }, [id, sessionLoading, session, can]);
   const actions = useMemo(
     () => (can('rfqs.publish') ? (rfq?.allowed_transitions ?? []) : []),
     [rfq, can],
@@ -80,9 +86,13 @@ export default function RfqDetailPage() {
     fn: (body: unknown) => Promise<unknown>,
     idempotent = true,
   ) {
-    if (mutationBusy) return;
+    if (mutationLock.current) return;
+    mutationLock.current = true;
     const prepared = idempotent ? idStore.current.prepare(operation, payload) : null;
-    if (idempotent && !prepared) return;
+    if (idempotent && !prepared) {
+      mutationLock.current = false;
+      return;
+    }
     setMutationBusy(true);
     setMutationError(null);
     try {
@@ -93,228 +103,239 @@ export default function RfqDetailPage() {
       if (idempotent) idStore.current.finish(operation, false);
       if (e instanceof ApiError) setMutationError(e);
     } finally {
+      mutationLock.current = false;
       setMutationBusy(false);
     }
   }
+  if (!sessionLoading && (!session || !can('rfqs.read')))
+    return (
+      <PermissionGate permission="rfqs.read">
+        <></>
+      </PermissionGate>
+    );
   if (busy) return <LoadingState label="Loading persisted RFQ workspace" />;
   if (initialError)
     return <ErrorState title={initialError.kind} description={initialError.message} />;
   if (!rfq)
     return <ErrorState title="Not found" description="The RFQ was not returned by the API." />;
   return (
-    <div className="detail">
-      <h3>
-        {rfq.rfq_number} — {rfq.title}
-      </h3>
-      {mutationError && (
-        <section className="pp-state pp-state--error" role="alert">
-          <strong>{mutationError.kind}</strong>
-          <span>{mutationError.message}</span>
-          <Button onClick={() => setMutationError(null)}>Dismiss</Button>
-        </section>
-      )}
-      <dl>
-        <dt>Status</dt>
-        <dd>
-          <StatusBadge>{rfq.status}</StatusBadge>
-        </dd>
-        <dt>Owner</dt>
-        <dd>{rfq.buyer_id}</dd>
-        <dt>Currency</dt>
-        <dd>{rfq.currency}</dd>
-        <dt>Version</dt>
-        <dd>{rfq.version}</dd>
-        <dt>Clarification deadline</dt>
-        <dd>{new Date(rfq.clarification_deadline).toLocaleString()}</dd>
-        <dt>Quotation deadline</dt>
-        <dd>{new Date(rfq.submission_deadline).toLocaleString()}</dd>
-        <dt>Created</dt>
-        <dd>{new Date(rfq.created_at).toLocaleString()}</dd>
-        <dt>Updated</dt>
-        <dd>{new Date(rfq.updated_at).toLocaleString()}</dd>
-      </dl>
-      {can('rfqs.update_draft') && ['DRAFT', 'READY_FOR_REVIEW'].includes(rfq.status) && (
-        <HeaderForm
-          rfq={rfq}
-          onSave={async (body) => {
-            await mutate(
-              'header:update',
-              { ...(body as Record<string, unknown>), version: rfq.version },
-              (payload) => updateRfq(rfq.id, payload),
-              false,
-            );
-          }}
-        />
-      )}
-      <section>
-        <h3>Lifecycle actions</h3>
-        {actions.map((to) => (
-          <Button
-            key={to}
-            disabled={mutationBusy}
-            onClick={() =>
-              void mutate(
-                `transition:${rfq.id}:${to}`,
-                { status: to, version: rfq.version },
-                (body) => transitionRfq(rfq.id, body),
-              )
-            }
-          >
-            {rfq.status} → {to}
-          </Button>
-        ))}
-        {can('rfqs.close') && rfq.status === 'QUOTATION_CLOSED' && (
-          <ReasonAction
-            label="Close RFQ"
-            onSubmit={(reason) =>
-              mutate(`close:${rfq.id}`, { version: rfq.version, reason }, (body) =>
-                closeRfq(rfq.id, body),
-              )
-            }
-          />
-        )}{' '}
-        {can('rfqs.cancel') && !['CANCELLED', 'CLOSED'].includes(rfq.status) && (
-          <ReasonAction
-            label="Cancel RFQ"
-            onSubmit={(reason) =>
-              mutate(`cancel:${rfq.id}:${reason}`, { version: rfq.version, reason }, (body) =>
-                cancelRfq(rfq.id, body),
-              )
-            }
-          />
-        )}{' '}
-        {can('rfqs.extend_deadline') &&
-          ['PUBLISHED', 'CLARIFICATION_OPEN', 'QUOTATION_OPEN'].includes(rfq.status) && (
-            <DeadlineAction
-              rfq={rfq}
-              onSubmit={(body) =>
-                mutate(
-                  `deadline:${rfq.id}:${JSON.stringify(body)}`,
-                  { ...body, version: rfq.version },
-                  (payload) => extendDeadline(rfq.id, payload),
-                )
-              }
-            />
-          )}
-      </section>
-      <Lines
-        rfq={rfq}
-        canEdit={can('rfqs.update_draft') && rfq.status === 'DRAFT'}
-        mutate={mutate}
-        mutationBusy={mutationBusy}
-      />
-      <section>
-        <h3>Suppliers and invitations</h3>
-        <div className="toolbar">
-          {can('rfq_invitations.manage') && (
-            <Button
-              onClick={async () =>
-                setSuppliers(await listSuppliers(new URLSearchParams('limit=20')))
-              }
-            >
-              Search suppliers
-            </Button>
-          )}
-        </div>
-        {can('rfq_invitations.manage') && suppliers && (
-          <form
-            className="item-row"
-            onSubmit={async (e) => {
-              e.preventDefault();
-              const fd = new FormData(e.currentTarget);
-              const supplierId = text(fd.get('supplierId'));
-              if (!supplierId) return;
+    <PermissionGate permission="rfqs.read">
+      <div className="detail">
+        <h3>
+          {rfq.rfq_number} — {rfq.title}
+        </h3>
+        {mutationError && (
+          <section className="pp-state pp-state--error" role="alert">
+            <strong>{mutationError.kind}</strong>
+            <span>{mutationError.message}</span>
+            <Button onClick={() => setMutationError(null)}>Dismiss</Button>
+          </section>
+        )}
+        <dl>
+          <dt>Status</dt>
+          <dd>
+            <StatusBadge>{rfq.status}</StatusBadge>
+          </dd>
+          <dt>Owner</dt>
+          <dd>{rfq.buyer_id}</dd>
+          <dt>Currency</dt>
+          <dd>{rfq.currency}</dd>
+          <dt>Version</dt>
+          <dd>{rfq.version}</dd>
+          <dt>Clarification deadline</dt>
+          <dd>{new Date(rfq.clarification_deadline).toLocaleString()}</dd>
+          <dt>Quotation deadline</dt>
+          <dd>{new Date(rfq.submission_deadline).toLocaleString()}</dd>
+          <dt>Created</dt>
+          <dd>{new Date(rfq.created_at).toLocaleString()}</dd>
+          <dt>Updated</dt>
+          <dd>{new Date(rfq.updated_at).toLocaleString()}</dd>
+        </dl>
+        {can('rfqs.update_draft') && ['DRAFT', 'READY_FOR_REVIEW'].includes(rfq.status) && (
+          <HeaderForm
+            rfq={rfq}
+            onSave={async (body) => {
               await mutate(
-                'invitation:create',
-                {
-                  supplierId,
-                  supplierContactId: text(fd.get('supplierContactId')) || undefined,
-                  expiresAt: text(fd.get('expiresAt')),
-                },
-                (payload) => inviteSupplier(rfq.id, payload),
+                'header:update',
+                { ...(body as Record<string, unknown>), version: rfq.version },
+                (payload) => updateRfq(rfq.id, payload),
                 false,
               );
             }}
-          >
-            <label>
-              Supplier
-              <Select
-                name="supplierId"
-                defaultValue=""
-                required
-                onChange={async (e) => {
-                  setSelectedSupplier(null);
-                  if (e.target.value) setSelectedSupplier(await getSupplier(e.target.value));
-                }}
+          />
+        )}
+        <section>
+          <h3>Lifecycle actions</h3>
+          {actions.map((to) => (
+            <Button
+              key={to}
+              disabled={mutationBusy}
+              onClick={() =>
+                void mutate(
+                  `transition:${rfq.id}:${to}`,
+                  { status: to, version: rfq.version },
+                  (body) => transitionRfq(rfq.id, body),
+                )
+              }
+            >
+              {rfq.status} → {to}
+            </Button>
+          ))}
+          {can('rfqs.close') && rfq.status === 'QUOTATION_CLOSED' && (
+            <ReasonAction
+              label="Close RFQ"
+              onSubmit={(reason) =>
+                mutate(`close:${rfq.id}`, { version: rfq.version, reason }, (body) =>
+                  closeRfq(rfq.id, body),
+                )
+              }
+            />
+          )}{' '}
+          {can('rfqs.cancel') && !['CANCELLED', 'CLOSED'].includes(rfq.status) && (
+            <ReasonAction
+              label="Cancel RFQ"
+              onSubmit={(reason) =>
+                mutate(`cancel:${rfq.id}:${reason}`, { version: rfq.version, reason }, (body) =>
+                  cancelRfq(rfq.id, body),
+                )
+              }
+            />
+          )}{' '}
+          {can('rfqs.extend_deadline') &&
+            ['PUBLISHED', 'CLARIFICATION_OPEN', 'QUOTATION_OPEN'].includes(rfq.status) && (
+              <DeadlineAction
+                rfq={rfq}
+                onSubmit={(body) =>
+                  mutate(
+                    `deadline:${rfq.id}:${JSON.stringify(body)}`,
+                    { ...body, version: rfq.version },
+                    (payload) => extendDeadline(rfq.id, payload),
+                  )
+                }
+              />
+            )}
+        </section>
+        <Lines
+          rfq={rfq}
+          canEdit={can('rfqs.update_draft') && rfq.status === 'DRAFT'}
+          mutate={mutate}
+          mutationBusy={mutationBusy}
+        />
+        <section>
+          <h3>Suppliers and invitations</h3>
+          <div className="toolbar">
+            {can('rfq_invitations.manage') && (
+              <Button
+                onClick={async () =>
+                  setSuppliers(await listSuppliers(new URLSearchParams('limit=20')))
+                }
               >
-                <option value="">Select supplier</option>
-                {suppliers.items.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.legal_name} — {s.status}/{s.qualification_status}
-                  </option>
-                ))}
-              </Select>
-            </label>
-
-            <label>
-              Contact
-              <Select name="supplierContactId">
-                <option value="">No contact</option>
-                {selectedSupplier?.contacts
-                  ?.filter((c) => c.active)
-                  .map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.full_name} {c.email}
+                Search suppliers
+              </Button>
+            )}
+          </div>
+          {can('rfq_invitations.manage') && suppliers && (
+            <form
+              className="item-row"
+              onSubmit={async (e) => {
+                e.preventDefault();
+                const fd = new FormData(e.currentTarget);
+                const supplierId = text(fd.get('supplierId'));
+                if (!supplierId) return;
+                await mutate(
+                  'invitation:create',
+                  {
+                    supplierId,
+                    supplierContactId: text(fd.get('supplierContactId')) || undefined,
+                    expiresAt: text(fd.get('expiresAt')),
+                  },
+                  (payload) => inviteSupplier(rfq.id, payload),
+                  false,
+                );
+              }}
+            >
+              <label>
+                Supplier
+                <Select
+                  name="supplierId"
+                  defaultValue=""
+                  required
+                  onChange={async (e) => {
+                    setSelectedSupplier(null);
+                    if (e.target.value) setSelectedSupplier(await getSupplier(e.target.value));
+                  }}
+                >
+                  <option value="">Select supplier</option>
+                  {suppliers.items.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.legal_name} — {s.status}/{s.qualification_status}
                     </option>
                   ))}
-              </Select>
-            </label>
-            <label>
-              Expires at
-              <Input name="expiresAt" type="datetime-local" required />
-            </label>
-            <Button>Add invitation</Button>
-          </form>
-        )}
-        <Table>
-          <tbody>
-            {rfq.invitations.map((i) => (
-              <tr key={i.id}>
-                <td>{i.supplierLegalName ?? i.supplier_id}</td>
-                <td>{i.supplierContactName ?? 'No contact'}</td>
-                <td>{i.status}</td>
-                <td>{text(i.sent_at)}</td>
-                <td>
-                  {can('rfq_invitations.manage') && (
-                    <ReasonAction
-                      label="Revoke"
-                      onSubmit={(reason) =>
-                        mutate(`revoke:${i.id}:${reason}`, { version: i.version, reason }, (body) =>
-                          revokeInvitation(rfq.id, i.id, body),
-                        )
-                      }
-                    />
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </Table>
-      </section>
-      <Clarifications
-        threads={clarifications}
-        canManage={can('rfq_clarifications.manage')}
-        mutate={mutate}
-        refresh={refresh}
-      />
-      <Quotations
-        rfqId={rfq.id}
-        data={quotations}
-        commercial={Boolean(session?.permissions.includes('quotations.read_commercial'))}
-      />
-      <Terms rfq={rfq} />
-      <Audit data={audit} />
-    </div>
+                </Select>
+              </label>
+
+              <label>
+                Contact
+                <Select name="supplierContactId">
+                  <option value="">No contact</option>
+                  {selectedSupplier?.contacts
+                    ?.filter((c) => c.active)
+                    .map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.full_name} {c.email}
+                      </option>
+                    ))}
+                </Select>
+              </label>
+              <label>
+                Expires at
+                <Input name="expiresAt" type="datetime-local" required />
+              </label>
+              <Button disabled={mutationBusy}>Add invitation</Button>
+            </form>
+          )}
+          <Table>
+            <tbody>
+              {rfq.invitations.map((i) => (
+                <tr key={i.id}>
+                  <td>{i.supplierLegalName ?? i.supplier_id}</td>
+                  <td>{i.supplierContactName ?? 'No contact'}</td>
+                  <td>{i.status}</td>
+                  <td>{text(i.sent_at)}</td>
+                  <td>
+                    {can('rfq_invitations.manage') && (
+                      <ReasonAction
+                        label="Revoke"
+                        onSubmit={(reason) =>
+                          mutate(
+                            `revoke:${i.id}:${reason}`,
+                            { version: i.version, reason },
+                            (body) => revokeInvitation(rfq.id, i.id, body),
+                          )
+                        }
+                      />
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+        </section>
+        <Clarifications
+          threads={clarifications}
+          canManage={can('rfq_clarifications.manage')}
+          mutate={mutate}
+          refresh={refresh}
+        />
+        <Quotations
+          rfqId={rfq.id}
+          data={quotations}
+          commercial={Boolean(session?.permissions.includes('quotations.read_commercial'))}
+        />
+        <Terms rfq={rfq} />
+        <Audit data={audit} />
+      </div>
+    </PermissionGate>
   );
 }
 function HeaderForm({
